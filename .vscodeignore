@@ -1,0 +1,36 @@
+# Source & build tooling — only dist/ ships
+src/**
+esbuild.js
+deploy.js
+tsconfig.json
+**/*.ts
+**/*.map
+
+# Dev & local config
+.claude/**
+.codeflare-trash/**
+.vscode/**
+.gitignore
+.git/**
+node_modules/**
+
+# Stray/test files (agent-generated output in the project root)
+**/*.html
+html/**
+*.vsix
+$null
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
+
+# Script files that don't belong in the packaged extension
+*.py
+*.ps1
+*.psm1
+*.psd1
+*.vb
+*.vbs
+*.bas

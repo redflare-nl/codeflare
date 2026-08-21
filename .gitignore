@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.vsix
+
+# CodeFlare runtime records (metrics, experiments, runs, lab, checkpoints, memory)
+.codeflare/
+.codeflare-trash/
+
+# Per-machine Claude Code settings (the shared .claude/settings.json IS committed)
+.claude/settings.local.json
+
+# Editor/OS noise
+.vscode-test/
+Thumbs.db
+.DS_Store

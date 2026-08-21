@@ -1,0 +1,669 @@
+{
+  "name": "codeflare",
+  "displayName": "CodeFlare",
+  "description": "AI coding assistant for local (OpenAI-compatible), OpenAI, and Claude backends",
+  "version": "1.37.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeflare.openChat",
+        "title": "CodeFlare: Open Chat",
+        "icon": {
+          "light": "media/icons/codeflare.svg",
+          "dark": "media/icons/codeflare.svg"
+        }
+      },
+      {
+        "command": "codeflare.sendSelection",
+        "title": "CodeFlare: Send Selection to Chat"
+      },
+      {
+        "command": "codeflare.explainCode",
+        "title": "CodeFlare: Explain Code"
+      },
+      {
+        "command": "codeflare.refactorCode",
+        "title": "CodeFlare: Refactor Code"
+      },
+      {
+        "command": "codeflare.fixBug",
+        "title": "CodeFlare: Fix Bug"
+      },
+      {
+        "command": "codeflare.addTests",
+        "title": "CodeFlare: Add Tests"
+      },
+      {
+        "command": "codeflare.documentCode",
+        "title": "CodeFlare: Document Code"
+      },
+      {
+        "command": "codeflare.applyEdit",
+        "title": "CodeFlare: Apply Edit"
+      },
+      {
+        "command": "codeflare.clearChat",
+        "title": "CodeFlare: Clear Chat"
+      },
+      {
+        "command": "codeflare.checkHealth",
+        "title": "CodeFlare: Check VLLM Health"
+      },
+      {
+        "command": "codeflare.checkEnvironment",
+        "title": "CodeFlare: Check Environment (runtimes & tools)"
+      },
+      {
+        "command": "codeflare.stopServers",
+        "title": "CodeFlare: Stop Agent Servers"
+      },
+      {
+        "command": "codeflare.metricsReport",
+        "title": "CodeFlare: Metrics Report (compare models)"
+      },
+      {
+        "command": "codeflare.proveIt",
+        "title": "CodeFlare: Prove It (independently verify the last change)"
+      },
+      {
+        "command": "codeflare.breakMySolution",
+        "title": "CodeFlare: Break My Solution (adversarial pass on the last change)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codeflare.openChat",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "submenu": "codeflare.submenu",
+          "group": "codeflare"
+        }
+      ],
+      "codeflare.submenu": [
+        {
+          "command": "codeflare.sendSelection",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "codeflare.explainCode",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "codeflare.refactorCode",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "codeflare.fixBug",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "codeflare.addTests",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "codeflare.documentCode",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "codeflare.submenu",
+        "label": "CodeFlare"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codeflare.openChat",
+        "key": "ctrl+shift+q",
+        "mac": "cmd+shift+q"
+      },
+      {
+        "command": "codeflare.sendSelection",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "CodeFlare",
+      "properties": {
+        "codeflare.provider": {
+          "type": "string",
+          "enum": [
+            "local",
+            "openai",
+            "anthropic"
+          ],
+          "enumDescriptions": [
+            "Local OpenAI-compatible server (VLLM, llama.cpp, Ollama, …)",
+            "OpenAI API (api.openai.com)",
+            "Anthropic Claude API (api.anthropic.com, native Messages API)"
+          ],
+          "default": "local",
+          "description": "Which backend to talk to. Determines the API endpoint, auth header, and request format."
+        },
+        "codeflare.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "API base URL. Leave blank to use the provider default (local: http://localhost:8001, openai: https://api.openai.com, anthropic: https://api.anthropic.com)."
+        },
+        "codeflare.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name/ID. Leave blank to auto-discover it from the server (local provider: the model served on /v1/models) or, for OpenAI/Anthropic, use the provider default (openai: gpt-4o, anthropic: claude-opus-4-8). A value here always overrides discovery."
+        },
+        "codeflare.autoDetectModel": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the model field is blank and the provider is local, query the server's /v1/models and use the model it serves — so the model name never has to be typed. An explicit model setting always takes precedence."
+        },
+        "codeflare.maxTokens": {
+          "type": "number",
+          "default": 0,
+          "description": "Maximum response tokens. 0 = auto: scale to the detected context window (n_ctx minus the prompt), capped at 65536 to avoid runaway output. Set a positive number to use that as a fixed ceiling instead (still bounded by what fits in the window)."
+        },
+        "codeflare.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "description": "Sampling temperature (0.0 - 1.0)"
+        },
+        "codeflare.contextLines": {
+          "type": "number",
+          "default": 50,
+          "description": "Lines of context around selection to include"
+        },
+        "codeflare.maxContextFiles": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum number of open files to include as context"
+        },
+        "codeflare.maxContextChars": {
+          "type": "number",
+          "default": 32000,
+          "description": "Maximum total characters of context to send"
+        },
+        "codeflare.agentMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let the model explore the workspace with file tools (list_files, read_file, search_text)"
+        },
+        "codeflare.agentMaxSteps": {
+          "type": "number",
+          "default": 25,
+          "description": "Maximum number of tool-calling steps the agent may take per message (higher = can build larger things in one go)"
+        },
+        "codeflare.agentEdit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the agent to create and edit files by path (create_file, edit_file)"
+        },
+        "codeflare.confirmEdits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show a diff and ask for confirmation before the agent writes any file. When off, edits are applied directly (like the Claude plugin)."
+        },
+        "codeflare.editSearchMaxLines": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "description": "Maximum number of lines an edit_file SEARCH block may span. Keeps the agent making small targeted edits instead of regenerating whole files."
+        },
+        "codeflare.overwriteMaxLines": {
+          "type": "number",
+          "default": 80,
+          "minimum": 10,
+          "description": "Maximum size (in lines) of an existing file that create_file may overwrite. Larger files must be changed with edit_file."
+        },
+        "codeflare.agentRunCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the agent to run shell commands (tests, build, git) and read their output"
+        },
+        "codeflare.agentProbes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the agent to place temporary measurement probes in your code (one-line instrumentation) to see what happens at runtime, then read the values back. Probes report to stdout and to .codeflare/probes.jsonl. Requires agentEdit."
+        },
+        "codeflare.probeAutoStrip": {
+          "type": "boolean",
+          "default": true,
+          "description": "Remove every probe again at the end of the turn that placed it, so instrumentation never stays in your code. Turn this off to measure across several turns — e.g. a server that keeps running — and remove the probes yourself afterwards."
+        },
+        "codeflare.agentDebug": {
+          "type": "boolean",
+          "default": false,
+          "description": "BETA: give the agent debugger tools (set breakpoints, start debugging via the project's launch.json, continue/step, read the call stack and variables, evaluate expressions) so it can investigate a runtime bug in the real debugger instead of adding temporary logging. Off by default because it adds several tools to every prompt; turn it on when you want the agent to debug. Requires agentRunCommands (debugging executes the program)."
+        },
+        "codeflare.pentestMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Penetration-testing mode. Tells the agent it is operating under an authorized, in-scope engagement so it actively carries out security tests (recon, scanning, fuzzing, exploitation, payload/PoC generation) instead of hedging, adding disclaimers, or refusing. Only enable for assets you own or are contracted to assess. Turn off for ordinary coding."
+        },
+        "codeflare.confirmCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before the agent runs a shell command (except trusted ones below)"
+        },
+        "codeflare.trustedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "mkdir",
+            "ls",
+            "dir",
+            "pwd",
+            "cat",
+            "type",
+            "head",
+            "tail",
+            "echo",
+            "wc",
+            "grep",
+            "node",
+            "python",
+            "python3",
+            "godot",
+            "godot_v*",
+            "npx tsc",
+            "npm install",
+            "npm i",
+            "npm init",
+            "npm run",
+            "npm ci",
+            "npm test",
+            "npm ls",
+            "new-item",
+            "get-childitem",
+            "get-content",
+            "test-path",
+            "move",
+            "move-item",
+            "copy",
+            "copy-item",
+            "out-null",
+            "out-string",
+            "out-host",
+            "out-default",
+            "write-output",
+            "write-host",
+            "select-object",
+            "sort-object",
+            "measure-object",
+            "group-object",
+            "format-table",
+            "format-list",
+            "set-location",
+            "push-location",
+            "pop-location",
+            "rename-item",
+            "remove-item",
+            "rm",
+            "del",
+            "rmdir",
+            "erase",
+            "ri",
+            "netstat",
+            "findstr",
+            "select-string",
+            "tasklist",
+            "whoami",
+            "hostname",
+            "ipconfig",
+            "get-process",
+            "git status",
+            "git diff",
+            "git log",
+            "git branch",
+            "npx serve",
+            "npx http-server",
+            "npx live-server",
+            "npx vite",
+            "serve",
+            "http-server",
+            "live-server",
+            "vite",
+            "npm start",
+            "yarn dev",
+            "yarn start",
+            "yarn serve",
+            "pnpm dev",
+            "pnpm start",
+            "pnpm serve",
+            "uvicorn",
+            "flask run",
+            "get-item",
+            "get-location",
+            "get-date",
+            "get-command",
+            "get-member",
+            "resolve-path",
+            "split-path",
+            "join-path",
+            "compare-object",
+            "where-object",
+            "foreach-object",
+            "measure-command",
+            "start-sleep",
+            "sleep",
+            "get-filehash",
+            "get-nettcpconnection",
+            "test-netconnection",
+            "convertto-json",
+            "convertfrom-json",
+            "convertto-csv",
+            "convertfrom-csv",
+            "invoke-webrequest",
+            "invoke-restmethod",
+            "iwr",
+            "irm",
+            "ping",
+            "set-content",
+            "add-content",
+            "out-file",
+            "tee-object",
+            "compress-archive",
+            "expand-archive",
+            "stop-process",
+            "taskkill",
+            "tree",
+            "more",
+            "sort",
+            "find",
+            "fc",
+            "where",
+            "ver",
+            "systeminfo",
+            "xcopy",
+            "pip install",
+            "pip3 install",
+            "pip list",
+            "pip show",
+            "py",
+            "pytest",
+            "tsc",
+            "eslint",
+            "prettier",
+            "jest",
+            "mocha",
+            "vitest",
+            "npx eslint",
+            "npx prettier",
+            "npx jest",
+            "npx vitest",
+            "npx mocha",
+            "npx tsx",
+            "npx ts-node",
+            "npx nodemon",
+            "npx tailwindcss",
+            "npx esbuild",
+            "npm outdated",
+            "npm audit",
+            "npm view",
+            "npm root",
+            "npm config get",
+            "yarn install",
+            "yarn add",
+            "yarn test",
+            "pnpm install",
+            "pnpm add",
+            "pnpm test",
+            "git init",
+            "git add",
+            "git commit",
+            "git show",
+            "git fetch",
+            "git remote",
+            "git stash list",
+            "git ls-files",
+            "git rev-parse",
+            "git describe",
+            "git blame",
+            "git shortlog",
+            "git config --get",
+            "git config --list"
+          ],
+          "description": "EXTRA command prefixes that run without a confirmation prompt, merged with the built-in safe list (mkdir, node, python, npm, git status, godot, …) — the built-ins always apply. Every part of a chained command (split on && || & ; |, quotes respected) must match; a leading 'cd <dir>' and a leading './' or '.\\' (run-from-here) are handled. An entry containing '*' is a glob — use it for version-embedded executables, e.g. 'godot_v*' matches 'Godot_v4.7.1-stable_win64.exe'."
+        },
+        "codeflare.artifactRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra folders the agent may READ from (never write) — for program OUTPUT that lands outside the workspace, e.g. a game/app's user-data dir. The OS temp dir is always readable; add appdata-style locations here. Supports env vars (%APPDATA%, ${HOME}) and ~ . Examples: \"%APPDATA%\\\\Godot\\\\app_userdata\", \"%LOCALAPPDATA%\\\\MyApp\", \"~/.local/share/MyApp\". SECURITY: appdata can hold tokens/cookies; with web access on, read access there is an exfiltration surface — only add roots you trust. Mutating tools stay workspace-only regardless."
+        },
+        "codeflare.commandTimeout": {
+          "type": "number",
+          "default": 60000,
+          "description": "Timeout in milliseconds for agent-run shell commands"
+        },
+        "codeflare.diagnosticsLoop": {
+          "type": "boolean",
+          "default": true,
+          "description": "After the agent edits files, check them for editor errors and automatically ask the agent to fix them"
+        },
+        "codeflare.diagnosticsMaxRounds": {
+          "type": "number",
+          "default": 2,
+          "description": "Maximum automatic fix rounds triggered by the diagnostics loop and the verify gate"
+        },
+        "codeflare.verifyGate": {
+          "type": "boolean",
+          "default": true,
+          "description": "After the agent finishes editing, automatically verify the project and feed any failure back so the agent fixes it before declaring done. This runs a verify command (see codeflare.verifyCommand — auto-detected when blank: a typecheck via 'npm run typecheck' or 'npx tsc --noEmit') and also reports NEW errors the changes introduced in files the agent did not touch (regressions). Requires agentRunCommands for the command step."
+        },
+        "codeflare.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command run by the verify gate after edits (e.g. 'npm run typecheck', 'npm test', or 'npm run typecheck && npm test'). Leave blank to auto-select per stack: CodeFlare detects the project's stacks (per module) and runs the cheapest sound check (typecheck/syntax/build) for each module whose files changed, using the project's own commands. Its output is fed back to the agent when it fails. Runs without a confirmation prompt — you set it yourself."
+        },
+        "codeflare.verifyTimeout": {
+          "type": "number",
+          "default": 180000,
+          "description": "Timeout in milliseconds for the verify-gate command (typecheck/tests can be slower than ordinary commands)."
+        },
+        "codeflare.diffReview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Before the agent finishes a turn that changed files, have it review its OWN diff against your request as a REQUIREMENT check — for each thing you asked for, does the diff actually satisfy what it MEANS (not a convenient reinterpretation)? 'Self-review passed' only appears when every requirement is met with evidence; unmet ones are fed back for a bounded fix round, and if the fix rounds run out, the still-unmet requirements are surfaced to you instead of silently declaring done. Runs after diagnostics and the verify gate pass, so it focuses on requirements and scope, not syntax."
+        },
+        "codeflare.clarifyAmbiguity": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a request hinges on a domain concept that does NOT exist anywhere in the codebase (e.g. asking to open a 'project' in an app that has no notion of a project), let the agent ask ONE concise clarifying question before planning instead of silently guessing an interpretation. CodeFlare also injects a note listing request terms it could not find in the code, so the model has the evidence to decide. Only fires for a central, genuinely absent concept — not minor details. Turn off if you never want clarifying questions."
+        },
+        "codeflare.repoMap": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject a compact project map (each source file with its top-level definitions) into the model's context, and offer the find_related tool. Helps the model reuse existing code and match the codebase's conventions instead of reinventing them. Rebuilt as files change; bounded in size."
+        },
+        "codeflare.metrics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Record one line of metrics per turn to .codeflare/metrics.jsonl (model, tool-call count, edit failures, verify failures, diagnostics errors, human interventions, tokens, files changed, outcome, duration). Groundwork for benchmarking models against the same task. Local only; .codeflare is hidden from the agent and excluded from the VSIX."
+        },
+        "codeflare.planApproval": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the agent creates a plan for a multi-step task, pause and let you review it (approve or give remarks) before it starts executing"
+        },
+        "codeflare.visualVerify": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer the verify_visual tool: the agent produces a screenshot (a web page via Playwright, a plot via savefig, a game/app via its own screenshot) and asks the model to check it against the intended result, feeding back concrete visual differences. Requires a VISION-capable model on your endpoint (it sends the image to /v1/chat/completions as an image part). Turn off if your model can't see images."
+        },
+        "codeflare.imageQC": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pixel-check PNGs the agent generates (black/empty detection) and automatically feed problems back — with the image attached — so the agent fixes its generation script"
+        },
+        "codeflare.contextCompaction": {
+          "type": "boolean",
+          "default": true,
+          "description": "Trim token overhead from the conversation sent to the model: collapse superseded/duplicate file reads and reads made stale by later edits (structure preserved)"
+        },
+        "codeflare.contextAutoCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the conversation grows large, summarize older turns into a compact note and keep recent turns verbatim (like Claude Code's context compaction)"
+        },
+        "codeflare.contextCompactThreshold": {
+          "type": "number",
+          "default": 100000,
+          "description": "Conversation size in characters above which auto-compaction runs"
+        },
+        "codeflare.contextKeepRecent": {
+          "type": "number",
+          "default": 20,
+          "description": "How many of the most recent messages to keep verbatim when compacting"
+        },
+        "codeflare.webAccess": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the agent to fetch web pages and run web searches (web_fetch, web_search)"
+        },
+        "codeflare.streamIdleTimeout": {
+          "type": "number",
+          "default": 300000,
+          "description": "Abort a request if the server sends nothing for this many milliseconds (stalled-connection watchdog). Also caps context-compaction requests."
+        },
+        "codeflare.serverMaxLifetime": {
+          "type": "number",
+          "default": 30,
+          "description": "Automatically stop dev servers the agent started after this many minutes (they otherwise pile up as stray python/node processes holding ports and folders). 0 = never auto-stop. Servers are also stopped when replaced on the same port, via 'CodeFlare: Stop Agent Servers', and on window close."
+        },
+        "codeflare.autonomyProfile": {
+          "type": "string",
+          "enum": [
+            "interactive",
+            "conservative-autonomous",
+            "autonomous"
+          ],
+          "enumDescriptions": [
+            "Default. Today's behaviour: confirmation prompts, no hard change budgets.",
+            "Opt-in unattended mode with TIGHT limits: max 3 changed files / 250 added lines per turn, protected paths blocked, no publish/deploy/push/installs, untrusted commands refused instead of prompted.",
+            "Opt-in unattended mode with wider limits (8 files / 800 added lines). Same hard blocks as conservative."
+          ],
+          "default": "interactive",
+          "description": "Deterministic autonomy policy. Non-interactive profiles enforce hard change budgets and path rules at tool level — the model cannot negotiate past them, and anything that would need a confirmation prompt is refused instead. Keep 'interactive' for normal use."
+        },
+        "codeflare.allowedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Autonomous modes only: when non-empty, the agent may ONLY modify paths matching these globs (e.g. \"src/**\", \"tests/**\"). Interactive mode ignores this list."
+        },
+        "codeflare.protectedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "EXTRA protected paths, merged with the built-in defaults (package manifests, lockfiles, .github/**, deployment/**, .env*, keys). In autonomous modes these are blocked outright; interactive mode keeps its normal confirmation behaviour."
+        },
+        "codeflare.forbiddenPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "EXTRA forbidden paths, merged with the built-in defaults (**/.ssh/**, credentials, secrets, .git/**, .codeflare/**). Never writable by the agent in ANY mode."
+        },
+        "codeflare.changeBudget": {
+          "type": "object",
+          "default": {},
+          "description": "Per-field overrides on the active profile's change budget (0 = unlimited). Fields: maxChangedFiles, maxNewFiles, maxAddedLines, maxDeletedLines, maxToolCalls, maxWallTimeMs. Exceeding a budget stops the turn with CHANGE_BUDGET_EXCEEDED.",
+          "properties": {
+            "maxChangedFiles": {
+              "type": "number"
+            },
+            "maxNewFiles": {
+              "type": "number"
+            },
+            "maxAddedLines": {
+              "type": "number"
+            },
+            "maxDeletedLines": {
+              "type": "number"
+            },
+            "maxToolCalls": {
+              "type": "number"
+            },
+            "maxWallTimeMs": {
+              "type": "number"
+            }
+          }
+        },
+        "codeflare.mcpServers": {
+          "type": "object",
+          "default": {},
+          "description": "MCP servers to connect (BETA). Map of name → { command, args, env }. Their tools become available to the agent as mcp__<name>__<tool>.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "npm run build",
+    "package": "npx @vscode/vsce package",
+    "postpackage": "node deploy.js",
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.27.3",
+    "pdfjs-dist": "^4.10.38",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "pdfkit": "^0.19.1"
+  }
+}
