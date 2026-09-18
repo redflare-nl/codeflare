@@ -1,9 +1,12 @@
 # Source & build tooling — only dist/ ships
 src/**
+test/**
 esbuild.js
 deploy.js
 tsconfig.json
+vitest.config.*
 **/*.ts
+**/*.mts
 **/*.map
 
 # Dev & local config
