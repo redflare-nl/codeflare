@@ -9,6 +9,10 @@ const DEFAULT_TRUSTED = [
   // Godot — on PATH ('godot') or the official versioned binary run via .\ (the
   // '*' glob matches any version: Godot_v4.7.1-stable_win64.exe, future bumps, …).
   'godot', 'godot_v*',
+  // Blender — headless mesh generation (--background --python). Rarely on PATH;
+  // the configured install root is registered as a discovered executable, which
+  // also session-trusts its basename.
+  'blender',
   'npm install', 'npm i', 'npm init', 'npm run', 'npm ci', 'npm test', 'npm ls',
   'new-item', 'get-childitem', 'get-content', 'test-path', 'move', 'move-item', 'copy', 'copy-item',
   'out-null', 'out-string', 'out-host', 'out-default', 'write-output', 'write-host',
@@ -137,6 +141,7 @@ export interface CodeFlareConfig {
   confirmCommands: boolean;
   trustedCommands: string[];
   artifactRoots: string[];
+  blenderPath: string;
   commandTimeout: number;
   diagnosticsLoop: boolean;
   diagnosticsMaxRounds: number;
@@ -149,6 +154,7 @@ export interface CodeFlareConfig {
   repoMap: boolean;
   metrics: boolean;
   imageQC: boolean;
+  meshQC: boolean;
   planApproval: boolean;
   contextCompaction: boolean;
   contextAutoCompact: boolean;
@@ -204,7 +210,10 @@ export function getConfig(): CodeFlareConfig {
     agentProbes: cfg.get<boolean>('agentProbes', true),
     probeAutoStrip: cfg.get<boolean>('probeAutoStrip', true),
     agentDebug: cfg.get<boolean>('agentDebug', false),
-    pentestMode: cfg.get<boolean>('pentestMode', true),
+    // Off by default: the offensive-security stance is injected into EVERY turn
+    // when on, which pollutes ordinary coding reasoning and wastes tokens. Users
+    // running authorized engagements enable it explicitly (codeflare.pentestMode).
+    pentestMode: cfg.get<boolean>('pentestMode', false),
     agentRunCommands: cfg.get<boolean>('agentRunCommands', true),
     confirmCommands: cfg.get<boolean>('confirmCommands', true),
     // Built-in safe commands are ALWAYS trusted; the user's saved list adds to
@@ -215,6 +224,7 @@ export function getConfig(): CodeFlareConfig {
       ...cfg.get<string[]>('trustedCommands', []),
     ])],
     artifactRoots: cfg.get<string[]>('artifactRoots', []),
+    blenderPath: (cfg.get<string>('blenderPath', '') || '').trim(),
     commandTimeout: cfg.get<number>('commandTimeout', 60000),
     diagnosticsLoop: cfg.get<boolean>('diagnosticsLoop', true),
     diagnosticsMaxRounds: cfg.get<number>('diagnosticsMaxRounds', 2),
@@ -227,6 +237,7 @@ export function getConfig(): CodeFlareConfig {
     repoMap: cfg.get<boolean>('repoMap', true),
     metrics: cfg.get<boolean>('metrics', true),
     imageQC: cfg.get<boolean>('imageQC', true),
+    meshQC: cfg.get<boolean>('meshQC', true),
     planApproval: cfg.get<boolean>('planApproval', true),
     contextCompaction: cfg.get<boolean>('contextCompaction', true),
     contextAutoCompact: cfg.get<boolean>('contextAutoCompact', true),

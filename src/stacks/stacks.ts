@@ -18,7 +18,7 @@ import { discoveredPath } from '../utils/executables';
  */
 
 export type StackKind =
-  | 'node' | 'python' | 'godot' | 'dotnet' | 'java' | 'powershell'
+  | 'node' | 'python' | 'godot' | 'blender' | 'dotnet' | 'java' | 'powershell'
   | 'cmake' | 'make' | 'go' | 'rust' | 'web';
 
 export type TaskKind = 'syntax' | 'typecheck' | 'lint' | 'test' | 'build' | 'run';
@@ -66,6 +66,12 @@ async function readText(dir: string, name: string): Promise<string | undefined> 
   if (!r) { return undefined; }
   try {
     const uri = vscode.Uri.joinPath(r, ...(dir === '.' ? [] : dir.split('/')), name);
+    return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+  } catch { return undefined; }
+}
+/** Read a file by URI (the glob helpers hand back URIs, not dir+name). */
+async function readUriText(uri: vscode.Uri): Promise<string | undefined> {
+  try {
     return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
   } catch { return undefined; }
 }
@@ -165,6 +171,37 @@ async function godotStack(dir: string): Promise<DetectedStack> {
     });
   }
   return { kind: 'godot', label: 'Godot / GDScript', root: dir, markers: ['project.godot'], tasks };
+}
+
+/**
+ * Blender as a headless mesh/STL generator. Unlike the other stacks there is no
+ * build or test command to run project-wide: a generation script is executed on
+ * demand and its OUTPUT (the exported STL) is what gets verified. The task here
+ * is therefore a 'run' template showing the exact invocation, with the quoting
+ * that a "C:\Program Files\…" path requires.
+ */
+async function blenderStack(dir: string, markers: string[]): Promise<DetectedStack> {
+  const found = discoveredPath('blender');
+  const blender = found ? `"${found}"` : 'blender';
+  const src = found
+    ? `configured/discovered binary (${found})`
+    : 'convention; Blender is rarely on PATH — set codeflare.blenderPath or find_executable("blender")';
+  const prefix = dir === '.' ? '' : `${dir}/`;
+  return {
+    kind: 'blender',
+    label: 'Blender (headless mesh/STL generation)',
+    root: dir,
+    markers,
+    tasks: [{
+      kind: 'run',
+      command: `${blender} --background --python "${prefix}<script>.py"`,
+      source: `Blender headless script (${src})`,
+    }],
+    // A .blend or a bpy script is a real signal, but it says nothing about there
+    // being a verifiable module here — flag it so the verify gate treats it gently.
+    confidence: 'low',
+    confidenceNote: 'Blender scripts are run on demand; verify the exported mesh, not the project',
+  };
 }
 
 async function dotnetStack(dir: string, marker: string): Promise<DetectedStack> {
@@ -289,6 +326,20 @@ async function detect(): Promise<DetectedStack[]> {
     for (const dir of await findDirs(g)) { javaDirs.add(dir); }
   }
   for (const dir of javaDirs) { push(await javaStack(dir)); }
+  // blender — a .blend file, or a Python script that actually drives Blender.
+  // The content check matters: a repo full of ordinary .py files must not become
+  // a Blender stack, and a generation script usually exists with NO .blend at all.
+  const blenderDirs = new Map<string, string[]>();
+  for (const dir of await findDirs('**/*.blend')) { blenderDirs.set(dir, ['*.blend']); }
+  for (const uri of await vscode.workspace.findFiles('**/*.py', EXCLUDE, 60)) {
+    const text = await readUriText(uri);
+    if (!text || !/^\s*import\s+bpy\b|^\s*from\s+bpy\b/m.test(text)) { continue; }
+    const dir = relDir(uri);
+    const markers = blenderDirs.get(dir) || [];
+    if (!markers.includes('bpy script')) { markers.push('bpy script'); }
+    blenderDirs.set(dir, markers);
+  }
+  for (const [dir, markers] of blenderDirs) { push(await blenderStack(dir, markers)); }
   // powershell (module manifests / test files)
   const psDirs = new Map<string, string[]>();
   for (const g of ['**/*.psd1', '**/*.psm1', '**/*.Tests.ps1']) {

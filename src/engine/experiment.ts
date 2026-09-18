@@ -28,6 +28,7 @@ export type Decision = 'ACCEPTED' | 'REJECTED' | 'INCONCLUSIVE' | 'NEEDS_REVIEW'
 /** What each gate demonstrated. 'not-run' is meaningful — it stays visible. */
 export interface GateOutcomes {
   imageQc?: 'clean' | 'failed';
+  meshQc?: 'clean' | 'failed';
   diagnostics?: 'clean' | 'failed' | 'not-run';
   verify?: 'clean' | 'failed' | 'skipped' | 'not-run';
   diffReview?: 'ok' | 'issues' | 'not-run';

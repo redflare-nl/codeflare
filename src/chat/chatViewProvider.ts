@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { VLLMClient, ChatMessage } from '../llm/client';
-import { buildSystemPrompt, buildMessages, CodeAction, setProjectInstructions, setProjectMap, setProjectStacks, setProjectMemory, setGroundingNote, groundingConcerns, setReviewMode, looksLikeReviewRequest } from '../llm/prompts';
+import { buildSystemPrompt, buildMessages, CodeAction, setProjectInstructions, setProjectMap, setProjectStacks, setProjectMemory, setGroundingNote, groundingConcerns, setReviewMode, looksLikeReviewRequest, setProblemShape, classifyProblem } from '../llm/prompts';
 import { gatherContext, resolveActiveEditor } from '../editor/contextGatherer';
 import { hasEditBlocks, parseEditBlocks, applyEditsWithDiff, getPreviewProvider } from '../editor/editApplier';
-import { getToolDefinitions, executeTool, describeToolCall, copyableCommand, runVerifyCommand, resolveForRead } from '../llm/tools';
+import { getToolDefinitions, executeTool, describeToolCall, copyableCommand, runVerifyCommand, resolveForRead, setToolWriteLock } from '../llm/tools';
 import { stripAllProbes, hasActiveProbes } from '../editor/probes';
 import { isMcpTool, callMcpTool } from '../mcp/client';
 import { collectNewErrors, snapshotErrorSignatures } from '../editor/diagnostics';
@@ -15,6 +15,7 @@ import { loadProjectMemory } from '../utils/projectMemory';
 import { loadExecutablesFromMemory } from '../utils/executables';
 import { TurnMetrics, newTurnMetrics, flushTurnMetrics, isMutatingTool, isWriteFailure, isUserDecline, isVerifyLikeCommand } from '../utils/metrics';
 import { analyzePng, looksBroken } from '../utils/pngStats';
+import { analyzeStl, describeStl, meshProblems } from '../utils/stlStats';
 import { extractPdfText } from '../utils/pdf';
 import { getConfig, getDetectedModel, explicitModelSetting } from '../utils/config';
 import { hasApiKey, setApiKey } from '../utils/secrets';
@@ -1375,10 +1376,17 @@ export class ChatViewProvider {
     }
     // Advisory review request → shape the output as calibrated findings (with
     // confidence/impact/evidence/compat-risk) and stay advisory. Per turn.
-    setReviewMode(looksLikeReviewRequest(text));
+    const isReview = looksLikeReviewRequest(text);
+    setReviewMode(isReview);
+    // V10 adaptive reasoning: inject proportional problem-solving discipline for
+    // the turn's problem shape (debug/perf/puzzle/architecture). Skipped for
+    // advisory turns (the review block owns those) and whenever no strong signal
+    // fires — so trivial edits pay nothing and stay fast.
+    setProblemShape(isReview ? null : classifyProblem(text));
     const systemPrompt = buildSystemPrompt(context);
     setGroundingNote([]);
     setReviewMode(false);
+    setProblemShape(null);
 
     try {
       await this._streamResponse(systemPrompt, modelText, context, images);
@@ -1528,10 +1536,12 @@ export class ChatViewProvider {
     this._postMessage({ type: 'addUserMessage', text: '🔎 Prove It — independently verify the last change' });
     this._postMessage({ type: 'toolActivity', label: 'PROVE IT: write tools disabled — gathering evidence' });
     this._verifyOnlyTurn = true;
+    setToolWriteLock(true);
     try {
       await this._handleUserMessage(instruction);
     } finally {
       this._verifyOnlyTurn = false;
+      setToolWriteLock(false);
     }
   }
 
@@ -1568,10 +1578,12 @@ export class ChatViewProvider {
     this._postMessage({ type: 'addUserMessage', text: '🔨 Break My Solution — adversarial pass on the last change' });
     this._postMessage({ type: 'toolActivity', label: 'BREAK MY SOLUTION: write tools disabled — attacking' });
     this._verifyOnlyTurn = true;
+    setToolWriteLock(true);
     try {
       await this._handleUserMessage(instruction);
     } finally {
       this._verifyOnlyTurn = false;
+      setToolWriteLock(false);
     }
   }
 
@@ -1725,6 +1737,9 @@ export class ChatViewProvider {
     // Image files produced by successful run_command calls (generator scripts)
     // — they bypass the write tools but must still get previewed and QC'd.
     const commandImages = new Set<string>();
+    // Meshes (.stl) the turn produced, from write tools or generator commands.
+    // A mesh can't be judged from pixels, so these go through their own gate.
+    const producedMeshes = new Set<string>();
     // Bounded nudges to keep the model going when it narrates instead of acting.
     let nudges = 0;
     const MAX_NUDGES = 4;
@@ -2171,7 +2186,7 @@ export class ChatViewProvider {
           // mentioned in a successful command or its output.
           if (call.function.name === 'run_command' && /Exit code: 0/.test(output)) {
             const src = call.function.arguments + '\n' + output.slice(0, 4000);
-            const names = src.match(/[\w./\\-]+\.(?:png|jpe?g|gif|webp|svg|html?|css|js|mjs|json|py|txt|md)\b/gi) || [];
+            const names = src.match(/[\w./\\-]+\.(?:png|jpe?g|gif|webp|svg|html?|css|js|mjs|json|py|txt|md|stl)\b/gi) || [];
             // Generator output often names bare files ("✓ paddle.png") while
             // the command cd'd into a folder — try that folder as a prefix too.
             const cdDir = (call.function.arguments.match(/\bcd\s+([\w./\\-]+)/i) || [])[1];
@@ -2184,6 +2199,9 @@ export class ChatViewProvider {
               if (/\.(png|jpe?g|gif|webp)$/i.test(n)) {
                 commandImages.add(n.replace(/\\/g, '/'));
                 if (cdDir) { commandImages.add(`${cdDir}/${n}`.replace(/\\/g, '/')); }
+              } else if (/\.stl$/i.test(n)) {
+                producedMeshes.add(n.replace(/\\/g, '/'));
+                if (cdDir) { producedMeshes.add(`${cdDir}/${n}`.replace(/\\/g, '/')); }
               }
             }
           }
@@ -2192,6 +2210,13 @@ export class ChatViewProvider {
           if (call.function.name === 'screenshot_url') {
             const m = output.match(/^Saved screenshot to "([^"]+)"/);
             if (m) { commandImages.add(m[1].replace(/\\/g, '/')); }
+          }
+          // api_request writes downloaded / generated images outside the write
+          // tools too — preview and pixel-check them like generated images.
+          if (call.function.name === 'api_request') {
+            for (const m of output.matchAll(/Saved (?:image|file) to "([^"]+)"/g)) {
+              commandImages.add(m[1].replace(/\\/g, '/'));
+            }
           }
           // Show a real old→new diff of what the write actually changed.
           if (writePath && /^(Created|Edited)\b/.test(output)) {
@@ -2354,6 +2379,14 @@ export class ChatViewProvider {
       let qcRan = false;
       if (!this._stopRequested) {
         qcRan = await this._runImageQc(producedImages, round);
+      }
+
+      // Mesh QC: geometrically check produced STLs (empty/truncated/collapsed).
+      // Runs only when image QC didn't already recurse, so the model is never
+      // handed two failure reports at once.
+      if (!this._stopRequested && !qcRan) {
+        qcRan = await this._runMeshQc(
+          new Set([...writtenPaths, ...producedMeshes]), finalResponse, round);
       }
 
       // Verification: after the agent wrote files, (1) check for NEW errors —
@@ -2550,6 +2583,104 @@ export class ChatViewProvider {
     const context = gatherContext();
     const systemPrompt = buildSystemPrompt(context);
     await this._streamResponse(systemPrompt, report, context, brokenUrls, round + 1);
+    return true;
+  }
+
+  /**
+   * Automatic mesh QC: geometrically check the STLs this turn produced. The
+   * counterpart of _runImageQc for 3D output — and a stronger check, because a
+   * mesh cannot be judged from pixels at all: "0 triangles" or "the export was
+   * cut off mid-write" is a proven property, not an impression of a picture.
+   * Broken meshes trigger a bounded fix round like the other gates.
+   */
+  private async _runMeshQc(paths: Set<string>, finalResponse: string, round: number): Promise<boolean> {
+    const config = getConfig();
+    if (!config.meshQC || paths.size === 0) { return false; }
+    if (round >= config.diagnosticsMaxRounds) { return false; }
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) { return false; }
+
+    // Meshes named in the final answer count too — the model often reports the
+    // file it wrote without the path ever passing through a write tool.
+    const candidates = new Set<string>(paths);
+    for (const m of (finalResponse || '').matchAll(/[\w./\\-]+\.stl\b/gi)) { candidates.add(m[0]); }
+
+    const MAX_BYTES = 64 * 1024 * 1024;
+    const problems: string[] = [];
+    const summaries: string[] = [];
+    const seen = new Set<string>();
+    let analyzed = 0;
+
+    for (const rel of candidates) {
+      const clean = rel.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+      if (!clean || clean.startsWith('/') || /^[a-zA-Z]:/.test(clean) || clean.includes('..')) { continue; }
+      const uri = vscode.Uri.joinPath(root, clean);
+      if (seen.has(uri.toString())) { continue; }
+      seen.add(uri.toString());
+      let bytes: Uint8Array;
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (stat.type !== vscode.FileType.File || stat.size > MAX_BYTES) { continue; }
+        bytes = await vscode.workspace.fs.readFile(uri);
+      } catch {
+        continue; // Mentioned but never created — not this gate's problem.
+      }
+      const s = analyzeStl(bytes);
+      if (!s) { continue; }
+      analyzed++;
+      const desc = `${clean} — ${describeStl(s)}`;
+      log(`Mesh QC: ${desc}`);
+      summaries.push(desc);
+      const found = meshProblems(s);
+      if (found.length === 0) { continue; }
+      // Flag each unchanged mesh ONCE per turn, so an intentional shape isn't
+      // re-litigated every round (same rule as image QC).
+      const sig = `${s.triangles}:${s.bbox.x},${s.bbox.y},${s.bbox.z}:${found.length}`;
+      if (this._qcReported.get(clean) === sig) {
+        log(`Mesh QC: ${clean} already reported this turn — skipping re-flag`);
+        continue;
+      }
+      this._qcReported.set(clean, sig);
+      problems.push(`${clean}: ${found.join('; ')}`);
+    }
+
+    if (analyzed === 0) { return false; }
+    // Report the geometry to the model even when it is fine: it cannot see the
+    // mesh, so the measured numbers are how it confirms what it claims it built.
+    // PROPERTY_TEST, not SCREENSHOT/RUNTIME: these are checked geometric
+    // properties of the produced artifact (non-empty, closed, well-formed).
+    this._turnEvidence.push(makeEvidence('PROPERTY_TEST', 'gate:meshQc',
+      `mesh QC → ${summaries.join(' | ')}`,
+      problems.length === 0 ? 'pass' : 'fail', 'post-edit'));
+
+    if (problems.length === 0) {
+      this._turnGates.meshQc = 'clean';
+      return false;
+    }
+    this._turnGates.meshQc = 'failed';
+
+    this._postMessage({
+      type: 'toolActivity',
+      label: `mesh QC: ${problems.length} mesh(es) broken — fixing`,
+    });
+
+    const report =
+      'AUTOMATIC MESH QC — a geometric check of the STL file(s) you just produced found problems:\n\n' +
+      problems.join('\n') +
+      (summaries.length ? `\n\nMeasured geometry:\n${summaries.join('\n')}` : '') +
+      '\n\nAn EMPTY mesh almost always means the export ran before the geometry existed, or ' +
+      'with nothing selected — check the order of operations in your script and whether the ' +
+      'objects you meant to export were selected. A TRUNCATED or malformed file means the ' +
+      'export did not finish. Collapsed or all-degenerate geometry means the shape was built ' +
+      'with zero size or all vertices at one point — check your dimensions and units (Blender ' +
+      'units are metres by default). Fix the script and REGENERATE, then confirm the new ' +
+      'triangle count. EXCEPTION: if this is genuinely what the user asked for, say so briefly ' +
+      'instead of changing it.';
+
+    this._history.push({ role: 'user', content: report });
+    const context = gatherContext();
+    const systemPrompt = buildSystemPrompt(context);
+    await this._streamResponse(systemPrompt, report, context, [], round + 1);
     return true;
   }
 

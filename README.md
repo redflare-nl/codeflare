@@ -56,6 +56,10 @@ edit → editor diagnostics → stack-aware build/test → analyze output → fi
 
 **Reach the web** — `web_fetch` (page as text), `web_search`, `web_extract` (harvest one page's links, images, emails and title — `render:true` runs it in a real browser for JS/news/SPA sites), and `crawl_site` (follow links across a site with loop detection, on-domain by default, capped at `max_pages` — default 8).
 
+**Use any web API from a key** — hand the chat an API key ("here is my PixelLab key …") or add it via **CodeFlare: Add API Key for an External Service**, and the agent works the service end-to-end on its own: `api_store_key` keeps the key encrypted in VS Code SecretStorage (the model only ever uses the service *name*), `api_discover` finds and caches the OpenAPI spec (conventional locations, `api.<domain>`, links in `llms.txt`/docs) and returns a compact endpoint index, `api_describe` gives the exact fields/enums of one operation, and `api_request` calls it with the key injected — only to that service's own host. Binary responses and base64 images in JSON land as workspace files (previewed and pixel-checked like any generated image), `{"$file":"sprite.png"}` in a body sends a workspace image, and asynchronous jobs are awaited in one call with `poll`. Keys are redacted from everything the model sees.
+
+**Generate 3D models** — point `codeflare.blenderPath` at your Blender install and the agent builds meshes headlessly: it writes a `bpy` script (reviewable and checkpointed like any file), runs `blender --background --python`, and exports STL via the current `wm.stl_export` operator. Detected as a stack wherever a `.blend` or a `bpy`-importing script lives, so the right invocation — correctly quoted for `C:\Program Files\…` — is always at hand. Every STL produced is then **geometrically checked**: triangle count, bounding box, degenerate faces and watertightness. An empty export (the classic "exported before the geometry existed") or a truncated file feeds straight back for a fix round, and the measured geometry is handed to the model so it reports numbers instead of claiming the shape is right. Stronger than a screenshot — watertightness is a proven property, not an impression of a picture.
+
 **Remember** — durable project facts in `.codeflare/memory.md` via `remember` / `forget` (kept for real project knowledge — engine, how tests run, architecture — not re-derivable code trivia).
 
 ## Reliability & safety
@@ -85,7 +89,9 @@ CodeFlare has extensive settings under the **CodeFlare** section (Settings → s
 | `codeflare.agentDebug` | `false` | Enable the debugger tools (beta). |
 | `codeflare.metrics` | `true` | Record per-turn metrics to `.codeflare/metrics.jsonl`. |
 | `codeflare.mcpServers` | `{}` | Connect MCP servers (beta); their tools appear as `mcp__<server>__<tool>`. |
-| `codeflare.pentestMode` | `true` | Tells the agent it operates under an authorized, in-scope security engagement. Turn off for ordinary coding. |
+| `codeflare.blenderPath` | (blank) | Where Blender is installed, for headless 3D/STL generation. Install folder, its parent, or the executable. |
+| `codeflare.meshQC` | `true` | Geometrically check generated STLs (empty/truncated/collapsed) and feed problems back. |
+| `codeflare.pentestMode` | `false` | Tells the agent it operates under an authorized, in-scope security engagement. Enable only for assets you own or are contracted to assess. |
 
 ## Commands & shortcuts
 
@@ -93,6 +99,7 @@ CodeFlare has extensive settings under the **CodeFlare** section (Settings → s
 - **CodeFlare: Send Selection to Chat** — `Ctrl/Cmd+Shift+L`
 - Right-click a selection for **Explain / Refactor / Fix Bug / Add Tests / Document Code**
 - **Check VLLM Health**, **Check Environment**, **Stop Agent Servers**, **Metrics Report (compare models)**, **Clear Chat**
+- **Add API Key for an External Service** / **Remove External Service API Key** — store or drop a named key (e.g. `pixellab`) without pasting it into the chat
 
 ## The `.codeflare/` directory
 
@@ -108,3 +115,4 @@ Local, git-ignorable, never shipped in the extension:
 - VS Code `^1.85`.
 - A reachable backend: an OpenAI-compatible server for `local`, or an API token for OpenAI/Anthropic.
 - For the verify gate / debugger: the project's own toolchain (npm, tsc, pytest, go, cargo, dotnet, gradle, a Godot binary, …). CodeFlare never invents a build strategy or installs tools — it uses what the project already defines.
+- For 3D/STL generation: Blender 4.2 or newer (tested against 5.1), located via `codeflare.blenderPath`.

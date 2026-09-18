@@ -55,6 +55,41 @@ async function matchInDir(dir: string, nameLc: string): Promise<string | undefin
 export interface FoundExe { path: string; source: string; }
 
 /**
+ * Resolve a user-configured INSTALL ROOT to the executable inside it. Accepts
+ * the three shapes a user realistically types for e.g. Blender:
+ *   - the executable itself   …/Blender 5.1/blender.exe
+ *   - the install folder      …/Blender 5.1
+ *   - its parent              …/Blender Foundation      (one versioned level down)
+ * The parent form matters because that is the folder users recognise — the
+ * version number is exactly what they don't want to re-type after an upgrade.
+ * Returns undefined when nothing matches; callers fall back to PATH discovery.
+ */
+export async function resolveExecutableRoot(root: string, name: string): Promise<string | undefined> {
+  const raw = (root || '').trim().replace(/^"|"$/g, '');
+  if (!raw) { return undefined; }
+  const nameLc = name.trim().toLowerCase();
+
+  // 1. A direct path to the binary.
+  if (await isFile(raw)) { return raw; }
+
+  // 2. The install folder: <root>/<name>(.exe)
+  const direct = await matchInDir(raw, nameLc);
+  if (direct) { return direct; }
+
+  // 3. The parent of a versioned install folder: <root>/*/<name>(.exe). Sorted
+  //    descending so the NEWEST version wins when several are installed
+  //    ("Blender 5.1" over "Blender 4.2") — a lexical sort is right for the
+  //    zero-padded-free "Blender <major>.<minor>" convention up to 2 digits.
+  let entries: string[];
+  try { entries = await fs.promises.readdir(raw); } catch { return undefined; }
+  for (const e of entries.sort().reverse()) {
+    const hit = await matchInDir(path.join(raw, e), nameLc);
+    if (hit) { return hit; }
+  }
+  return undefined;
+}
+
+/**
  * Locate an executable by name. Search order: PATH → workspace root → up to 3
  * parent levels. PATH is checked by exact name only (versioned binaries live
  * locally, not on PATH); the workspace/parent dirs also match "name*".

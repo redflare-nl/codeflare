@@ -2,7 +2,7 @@
   "name": "codeflare",
   "displayName": "CodeFlare",
   "description": "AI coding assistant for local (OpenAI-compatible), OpenAI, and Claude backends",
-  "version": "1.37.0",
+  "version": "1.40.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"
@@ -80,6 +80,14 @@
       {
         "command": "codeflare.breakMySolution",
         "title": "CodeFlare: Break My Solution (adversarial pass on the last change)"
+      },
+      {
+        "command": "codeflare.addApiService",
+        "title": "CodeFlare: Add API Key for an External Service"
+      },
+      {
+        "command": "codeflare.removeApiService",
+        "title": "CodeFlare: Remove External Service API Key"
       }
     ],
     "menus": {
@@ -253,8 +261,8 @@
         },
         "codeflare.pentestMode": {
           "type": "boolean",
-          "default": true,
-          "description": "Penetration-testing mode. Tells the agent it is operating under an authorized, in-scope engagement so it actively carries out security tests (recon, scanning, fuzzing, exploitation, payload/PoC generation) instead of hedging, adding disclaimers, or refusing. Only enable for assets you own or are contracted to assess. Turn off for ordinary coding."
+          "default": false,
+          "description": "Penetration-testing mode. Tells the agent it is operating under an authorized, in-scope engagement so it actively carries out security tests (recon, scanning, fuzzing, exploitation, payload/PoC generation) instead of hedging, adding disclaimers, or refusing. Off by default so ordinary coding gets a clean reasoning environment; enable it explicitly only for assets you own or are contracted to assess."
         },
         "codeflare.confirmCommands": {
           "type": "boolean",
@@ -511,10 +519,20 @@
           "default": true,
           "description": "Offer the verify_visual tool: the agent produces a screenshot (a web page via Playwright, a plot via savefig, a game/app via its own screenshot) and asks the model to check it against the intended result, feeding back concrete visual differences. Requires a VISION-capable model on your endpoint (it sends the image to /v1/chat/completions as an image part). Turn off if your model can't see images."
         },
+        "codeflare.blenderPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Where Blender is installed, for headless 3D/STL generation. Accepts the install folder (`C:\\Program Files\\Blender Foundation\\Blender 5.1`), its parent (`C:\\Program Files\\Blender Foundation` — the newest version wins), or the executable itself. Leave empty to look for `blender` on PATH."
+        },
         "codeflare.imageQC": {
           "type": "boolean",
           "default": true,
           "description": "Pixel-check PNGs the agent generates (black/empty detection) and automatically feed problems back — with the image attached — so the agent fixes its generation script"
+        },
+        "codeflare.meshQC": {
+          "type": "boolean",
+          "default": true,
+          "description": "Geometrically check STL meshes the agent generates (empty, truncated, collapsed or all-degenerate geometry) and feed problems back with the measured triangle count, bounding box and watertightness so the agent fixes its generation script"
         },
         "codeflare.contextCompaction": {
           "type": "boolean",

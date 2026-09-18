@@ -12,6 +12,9 @@ import { collectDiagnostics } from '../editor/diagnostics';
 import { webFetch, webSearch, extractFromHtml, crawlSite, BROWSER_UA } from '../utils/web';
 import { screenshotUrl, renderPageHtml } from '../utils/webshot';
 import { getMcpToolDefinitions } from '../mcp/client';
+import { ApiAuth, SaveError, SaveResult, discoverSpec, performApiRequest, renderDiscovery, resolveUrl } from '../utils/apiClient';
+import { OpenApiDoc, describeOperation, findOperationPath, listEndpoints, renderEndpointList, specBaseUrl } from '../utils/apiSpec';
+import { allServiceSecrets, describeApiServices, getApiService, hostAllowed, listApiServices, normalizeServiceName, pinHost, upsertApiService } from '../utils/apiServices';
 import { addProbe, listProbes, readProbes, removeProbes } from '../editor/probes';
 import { findRelated, invalidateRepoMap } from '../editor/repoMap';
 import { recordPreMutation } from '../editor/checkpoint';
@@ -257,7 +260,7 @@ const READ_TOOLS: ToolDefinition[] = [
     function: {
       name: 'find_executable',
       description:
-        'Locate an interpreter or build tool (e.g. "python", "java", "php", "godot", "dotnet") ' +
+        'Locate an interpreter or build tool (e.g. "python", "java", "php", "godot", "blender", "dotnet") ' +
         'when it is NOT plainly on PATH — it may be a versioned local binary in the project or a ' +
         'parent folder. Searches PATH first, then the workspace root, then up the parent chain, ' +
         'and matches versioned names ("godot" finds "Godot_v4.7.1-stable_win64.exe"). On success it ' +
@@ -418,6 +421,126 @@ const WEB_TOOLS: ToolDefinition[] = [
         properties: {
           url: { type: 'string', description: 'Absolute http(s) URL of the page to capture.' },
           path: { type: 'string', description: 'Workspace path for the .png (default "screenshot.png").' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+];
+
+// External web APIs by service name — the key is stored encrypted (utils/apiServices)
+// and injected by api_request; the model only ever handles the service NAME.
+const API_TOOLS: ToolDefinition[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'api_services',
+      description: 'List the external API services that have a stored key (name, base URL, auth scheme, whether the spec was discovered). Keys are never shown.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'api_store_key',
+      description:
+        'Store an API key the user gave you for an EXTERNAL web service, encrypted, under a short service ' +
+        'name (e.g. "pixellab"). Do this ONCE when the user hands you a key; afterwards call the service by ' +
+        'name with api_request — never paste the key into files, commands or replies. Pass base_url (the API ' +
+        'root, e.g. https://api.example.com/v2) if the user told you; api_discover fills it in otherwise.',
+      parameters: {
+        type: 'object',
+        properties: {
+          service: { type: 'string', description: 'Short service name: letters, digits, "-", "_" (e.g. "pixellab").' },
+          key: { type: 'string', description: 'The API key / token exactly as the user gave it.' },
+          base_url: { type: 'string', description: 'Absolute API base URL if known (optional).' },
+          auth: { type: 'string', enum: ['bearer', 'header', 'query', 'basic'], description: 'How the key is sent. Default bearer (Authorization: Bearer <key>); api_discover corrects it from the spec.' },
+          auth_name: { type: 'string', description: 'Header or query-parameter name for auth "header"/"query" (e.g. "X-API-Key").' },
+          note: { type: 'string', description: 'Optional short note (plan, limits, purpose).' },
+        },
+        required: ['service', 'key'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'api_discover',
+      description:
+        'Find and read the OpenAPI/Swagger spec of a web API and return a compact endpoint index. Probes the ' +
+        'usual spec locations (…/openapi.json, /v1, /v2, api.<domain>, links in llms.txt / the docs page) ' +
+        'starting from the service\'s known base URL or from url (its website, docs page, API base, or the ' +
+        'spec itself); caches the spec; records base URL + auth scheme on the service. Pass filter:"keyword" ' +
+        'to narrow a large index (repeat calls on a discovered service are instant). If nothing is found, ' +
+        'web_search "<service> API documentation" and pass the URL you find.',
+      parameters: {
+        type: 'object',
+        properties: {
+          service: { type: 'string', description: 'Service name (from api_store_key). Optional for a public API.' },
+          url: { type: 'string', description: 'Website / docs page / API base / spec URL to start from (optional when the service already has one).' },
+          filter: { type: 'string', description: 'Keyword(s) to narrow the endpoint index, e.g. "animation".' },
+          refresh: { type: 'boolean', description: 'Re-download the spec even if cached.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'api_describe',
+      description:
+        'The exact contract of ONE operation from a discovered spec: description, path/query parameters, ' +
+        'request-body fields (type, REQUIRED, enum values, defaults) and the response shape. Always call ' +
+        'this before the first api_request to an operation — never guess field names or enum values.',
+      parameters: {
+        type: 'object',
+        properties: {
+          service: { type: 'string', description: 'Service name whose spec was discovered.' },
+          spec_url: { type: 'string', description: 'Alternative to service: the spec URL api_discover reported.' },
+          method: { type: 'string', description: 'HTTP method (GET, POST, …).' },
+          path: { type: 'string', description: 'Operation path as listed by api_discover, e.g. "/animate-with-text".' },
+        },
+        required: ['method', 'path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'api_request',
+      description:
+        'Call a web API. With service:"name" the stored key is injected (only for that service\'s own host) and ' +
+        'url may be a path relative to its base URL (e.g. "/balance"). Without service it is a plain ' +
+        'unauthenticated request. body is sent as JSON; inside it {"$file":"path.png"} becomes the base64 of ' +
+        'that workspace file and {"$dataUrl":"path.png"} a data: URI. Binary responses (image/zip/…) are ' +
+        'written to save_to; base64 images inside a JSON response are written to save_images_dir (one file per ' +
+        'image, format auto-detected) and replaced by their path in the returned JSON. For asynchronous jobs, ' +
+        'GET the status endpoint with poll:{status_field, done_values, interval_ms, max_wait_ms} to wait in ' +
+        'ONE call. Long strings in responses are summarized; the JSON is truncated at max_chars.',
+      parameters: {
+        type: 'object',
+        properties: {
+          service: { type: 'string', description: 'Service name whose key to use (optional).' },
+          method: { type: 'string', description: 'GET, POST, PUT, PATCH, DELETE. Default: POST when body is given, else GET.' },
+          url: { type: 'string', description: 'Absolute https URL, or a path relative to the service base URL.' },
+          query: { type: 'object', description: 'Query-string parameters.' },
+          headers: { type: 'object', description: 'Extra request headers (Authorization is managed for you).' },
+          body: { description: 'JSON body (object/array), or a raw string.' },
+          save_to: { type: 'string', description: 'Workspace path for a binary response or for the single image in a JSON response (extension added automatically).' },
+          save_images_dir: { type: 'string', description: 'Workspace folder to write every base64 image found in the JSON response.' },
+          save_images_prefix: { type: 'string', description: 'File-name stem for saved images (default: derived from the JSON field).' },
+          poll: {
+            type: 'object',
+            description: 'GET only: repeat until the status field reaches a terminal value.',
+            properties: {
+              status_field: { type: 'string', description: 'JSON path of the status (default "status").' },
+              done_values: { type: 'array', items: { type: 'string' }, description: 'Terminal values (default completed/done/succeeded/failed/error/…).' },
+              interval_ms: { type: 'number', description: 'Wait between polls (default 3000).' },
+              max_wait_ms: { type: 'number', description: 'Give up after this long (default 120000, max 600000).' },
+            },
+          },
+          timeout_ms: { type: 'number', description: 'Per-request timeout (default 60000, max 300000).' },
+          max_chars: { type: 'number', description: 'Cap on returned JSON text (default 8000).' },
         },
         required: ['url'],
       },
@@ -1058,7 +1181,7 @@ export interface ToolOptions {
 // the UI labels via describe. Adding a tool = add its schema literal to the
 // right group array + one handler + one describe entry here; no switch to edit.
 
-export type ToolGroup = 'read' | 'lsp' | 'plan' | 'write' | 'probe' | 'run' | 'web' | 'subagent' | 'debug' | 'vision' | 'lab';
+export type ToolGroup = 'read' | 'lsp' | 'plan' | 'write' | 'probe' | 'run' | 'web' | 'api' | 'subagent' | 'debug' | 'vision' | 'lab';
 
 export interface ToolSpec {
   def: ToolDefinition;
@@ -1178,6 +1301,206 @@ async function screenshotUrlTool(url: string, relPath?: string): Promise<string>
     `"<what the page should show>") to check it.`;
 }
 
+
+// ── External API tools (utils/apiClient + utils/apiServices) ────────
+// Specs are cached in memory and under .codeflare/api-specs/ so api_describe
+// still works after a window reload without re-downloading a 400 KB document.
+const specCache = new Map<string, { specUrl: string; spec: OpenApiDoc }>();
+
+function specCacheUri(name: string): vscode.Uri | undefined {
+  const root = workspaceRoot();
+  if (!root) { return undefined; }
+  const safe = name.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80);
+  return vscode.Uri.joinPath(root, '.codeflare', 'api-specs', `${safe}.json`);
+}
+
+async function loadCachedSpec(name: string): Promise<{ specUrl: string; spec: OpenApiDoc } | undefined> {
+  const hit = specCache.get(name);
+  if (hit) { return hit; }
+  const uri = specCacheUri(name);
+  if (!uri) { return undefined; }
+  try {
+    const raw = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)));
+    if (raw && typeof raw.specUrl === 'string' && raw.spec && raw.spec.paths) {
+      const entry = { specUrl: raw.specUrl, spec: raw.spec as OpenApiDoc };
+      specCache.set(name, entry);
+      return entry;
+    }
+  } catch { /* no cache */ }
+  return undefined;
+}
+
+async function storeCachedSpec(name: string, entry: { specUrl: string; spec: OpenApiDoc }): Promise<void> {
+  specCache.set(name, entry);
+  const uri = specCacheUri(name);
+  if (!uri) { return; }
+  try {
+    const dir = vscode.Uri.joinPath(uri, '..');
+    await vscode.workspace.fs.createDirectory(dir);
+    const ignore = vscode.Uri.joinPath(dir, '..', '.gitignore');
+    try { await vscode.workspace.fs.stat(ignore); } catch { await vscode.workspace.fs.writeFile(ignore, Buffer.from('*\n')); }
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(JSON.stringify(entry)));
+  } catch (err: any) { log(`api spec cache write failed: ${err.message}`); }
+}
+
+// A verification-only turn (Prove It / Break My Solution) write-locks the
+// workspace; api_request may still READ APIs but must not save files then.
+let toolWriteLocked = false;
+export function setToolWriteLock(locked: boolean): void { toolWriteLocked = locked; }
+
+/** Write bytes a tool received to the workspace: same policy gate + checkpoint as create_file. */
+async function saveWorkspaceBytes(relPath: string, bytes: Uint8Array): Promise<SaveResult | SaveError> {
+  if (toolWriteLocked) { return { ok: false, error: "This is a verification-only turn (write-locked) — the response was not saved." }; }
+  if (!getConfig().agentEdit) { return { ok: false, error: 'File editing is disabled (codeflare.agentEdit is off) — cannot save the response.' }; }
+  const rel = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
+  const uri = resolveInWorkspace(rel);
+  if ('error' in uri) { return { ok: false, error: uri.error }; }
+  let isNew = true;
+  try { await vscode.workspace.fs.stat(uri); isNew = false; } catch { /* new file */ }
+  const verdict = gateMutation(rel, { isNew, addedLines: 0 });
+  if (!verdict.allowed) { return { ok: false, error: policyMessage(verdict) }; }
+  await recordPreMutation(rel);
+  try {
+    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+    await vscode.workspace.fs.writeFile(uri, bytes);
+  } catch (err: any) { return { ok: false, error: `Could not write "${rel}": ${err.message}` }; }
+  return { ok: true, rel, bytes: bytes.length };
+}
+
+async function readWorkspaceBytes(relPath: string): Promise<Uint8Array | { error: string }> {
+  const uri = resolveForRead(relPath);
+  if ('error' in uri) { return uri; }
+  try { return await vscode.workspace.fs.readFile(uri); } catch (err: any) { return { error: err.message }; }
+}
+
+function apiServicesTool(): string {
+  const d = describeApiServices();
+  return d
+    ? `Configured external API services:\n${d}\n(Keys are stored encrypted and injected automatically by api_request.)`
+    : 'No external API services configured. When the user gives you an API key, store it with api_store_key(service, key).';
+}
+
+async function apiStoreKeyTool(a: any): Promise<string> {
+  const name = normalizeServiceName(String(a.service ?? ''));
+  const key = String(a.key ?? '').trim();
+  if (!name) { return 'Provide a short service name, e.g. "pixellab".'; }
+  if (!key) { return 'Provide the key value.'; }
+  const auth = ['bearer', 'header', 'query', 'basic'].includes(a.auth) ? a.auth : undefined;
+  const r = await upsertApiService({
+    name,
+    baseUrl: a.base_url ? String(a.base_url).trim() : undefined,
+    auth,
+    authName: a.auth_name ? String(a.auth_name) : undefined,
+    note: a.note ? String(a.note) : undefined,
+  }, key);
+  if ('error' in r) { return r.error; }
+  return `Stored the key for "${r.name}" (${r.auth}${r.authName ? ' ' + r.authName : ''}) in encrypted storage` +
+    `${r.baseUrl ? `, base URL ${r.baseUrl}` : ''}. From now on call it with api_request(service:"${r.name}", …) — ` +
+    `do NOT repeat the key anywhere. Next: api_discover(service:"${r.name}"` +
+    `${r.baseUrl ? '' : ', url:"<API base, docs page or website URL>"'}) to load its endpoints.`;
+}
+
+async function apiDiscoverTool(a: any): Promise<string> {
+  if (!getConfig().webAccess) { return 'Web access is disabled (codeflare.webAccess).'; }
+  const name = a.service ? normalizeServiceName(String(a.service)) : '';
+  const url = a.url ? String(a.url).trim() : '';
+  const filter = a.filter ? String(a.filter) : undefined;
+  const svc = name ? getApiService(name) : undefined;
+  if (name && !svc && !url) {
+    return `Unknown service "${name}". Store its key first with api_store_key, or pass url for a public API.`;
+  }
+  const cacheKey = name || `url:${url}`;
+  if (!a.refresh && !url) {
+    const c = await loadCachedSpec(cacheKey);
+    if (c) {
+      return `${c.spec.info?.title || 'API'} — spec ${c.specUrl} (cached)\nBase URL: ${svc?.meta.baseUrl || specBaseUrl(c.spec, c.specUrl)}\n\n` +
+        renderEndpointList(c.spec, { filter }) +
+        '\n\nNext: api_describe(service, method, path) for the exact parameters of the operation you need.';
+    }
+  }
+  const seed = url || svc?.meta.specUrl || svc?.meta.baseUrl;
+  if (!seed) {
+    return `No URL known for "${name}" yet. web_search "${name} API documentation" (or ask the user), then call ` +
+      `api_discover(service:"${name}", url:"<API base, docs page or openapi.json URL>").`;
+  }
+  const d = await discoverSpec(seed, { onProgress: m => log(`api_discover: ${m}`) });
+  if (!('spec' in d)) {
+    return `Tried ${d.tried.length} location(s) starting from ${seed} — nothing parsed as an OpenAPI/Swagger document.\n` +
+      d.hints.join('\n') + `\nTried (first 12): ${d.tried.slice(0, 12).join(', ')}`;
+  }
+  await storeCachedSpec(cacheKey, { specUrl: d.specUrl, spec: d.spec });
+  if (name) {
+    const firstTime = !svc?.meta.specUrl;
+    await upsertApiService({
+      name,
+      baseUrl: d.baseUrl,
+      specUrl: d.specUrl,
+      ...(firstTime && d.auth.scheme !== 'none' ? { auth: d.auth.scheme, authName: d.auth.name } : {}),
+    });
+  }
+  return renderDiscovery(d, renderEndpointList(d.spec, { filter }));
+}
+
+async function apiDescribeTool(a: any): Promise<string> {
+  const name = a.service ? normalizeServiceName(String(a.service)) : '';
+  const specUrl = a.spec_url ? String(a.spec_url).trim() : '';
+  const method = String(a.method ?? 'GET');
+  const p = String(a.path ?? a.url ?? '').trim();
+  if (!p) { return 'Provide method and path (e.g. POST /animate-with-text).'; }
+  const cacheKey = name || (specUrl ? `url:${specUrl}` : '');
+  if (!cacheKey) { return 'Provide service (or spec_url).'; }
+  let c = await loadCachedSpec(cacheKey);
+  if (!c) {
+    const svc = name ? getApiService(name) : undefined;
+    const seed = specUrl || svc?.meta.specUrl || svc?.meta.baseUrl;
+    if (!seed) { return `No spec loaded for "${cacheKey}". Call api_discover first.`; }
+    const d = await discoverSpec(seed);
+    if (!('spec' in d)) { return `No spec found starting from ${seed}. Call api_discover with the right URL.`; }
+    c = { specUrl: d.specUrl, spec: d.spec };
+    await storeCachedSpec(cacheKey, c);
+  }
+  const real = findOperationPath(c.spec, p);
+  const text = real ? describeOperation(c.spec, method, real) : null;
+  if (text) { return text; }
+  const stem = p.replace(/^\/+/, '').split('/')[0] || '#';
+  const near = listEndpoints(c.spec).filter(e => e.path.includes(stem)).slice(0, 8);
+  return `No ${method.toUpperCase()} ${p} in the spec.` +
+    (near.length ? ` Similar: ${near.map(e => e.method + ' ' + e.path).join(', ')}` : ' Use api_discover with a filter to find the right path.');
+}
+
+async function apiRequestTool(a: any): Promise<string> {
+  if (!getConfig().webAccess) { return 'Web access is disabled (codeflare.webAccess).'; }
+  const url = String(a.url ?? a.path ?? '').trim();
+  if (!url) { return 'Provide "url" (absolute https URL, or a path relative to the service base URL).'; }
+  let auth: ApiAuth | undefined;
+  let baseUrl: string | undefined;
+  if (a.service) {
+    const svc = getApiService(String(a.service));
+    if (!svc) {
+      const names = listApiServices().map(m => m.name).join(', ');
+      return `Unknown service "${a.service}". Configured: ${names || '(none)'}. Store its key first with api_store_key.`;
+    }
+    if (!svc.key) { return `Service "${svc.meta.name}" has no key stored. Ask the user for it and call api_store_key.`; }
+    baseUrl = svc.meta.baseUrl;
+    const resolved = resolveUrl(url, baseUrl);
+    if (typeof resolved !== 'string') { return resolved.error; }
+    const allowed = hostAllowed(svc.meta, resolved);
+    if (!allowed.ok) { return allowed.reason; }
+    if (svc.meta.hosts.length === 0) { await pinHost(svc.meta.name, resolved); }
+    auth = { scheme: svc.meta.auth, name: svc.meta.authName, prefix: svc.meta.authPrefix, value: svc.key };
+  }
+  return performApiRequest({
+    method: a.method, url, query: a.query, headers: a.headers, body: a.body,
+    timeout_ms: a.timeout_ms, save_to: a.save_to, save_images_dir: a.save_images_dir,
+    save_images_prefix: a.save_images_prefix, poll: a.poll, max_chars: a.max_chars,
+  }, auth, baseUrl, {
+    saveFile: saveWorkspaceBytes,
+    readFile: readWorkspaceBytes,
+    redact: allServiceSecrets(),
+    onProgress: m => log(`api_request: ${m}`),
+  });
+}
+
 // name → executor. Schema lives in the group arrays above; this binds behaviour.
 const HANDLERS: Record<string, (a: any) => Promise<string> | string> = {
   list_files: a => listFiles(a.path ?? '.'),
@@ -1221,6 +1544,11 @@ const HANDLERS: Record<string, (a: any) => Promise<string> | string> = {
   web_extract: a => webExtractTool(a.url ?? '', a.render === true),
   crawl_site: a => crawlSiteTool(a.url ?? '', a.max_pages, a.same_domain, a.render === true),
   screenshot_url: a => screenshotUrlTool(a.url ?? '', a.path),
+  api_services: () => apiServicesTool(),
+  api_store_key: a => apiStoreKeyTool(a),
+  api_discover: a => apiDiscoverTool(a),
+  api_describe: a => apiDescribeTool(a),
+  api_request: a => apiRequestTool(a),
   create_file: a => createFile(a.path ?? '', a.content ?? ''),
   edit_file: a => editFile(a.path ?? '', a.search ?? '', a.replace ?? ''),
   move_file: a => moveFile(a.source ?? '', a.destination ?? ''),
@@ -1270,6 +1598,11 @@ const DESCRIBERS: Record<string, (a: any) => string> = {
   web_extract: a => `web_extract(${a.url ?? '?'}${a.render ? ', render' : ''})`,
   crawl_site: a => `crawl_site(${a.url ?? '?'}, ≤${a.max_pages ?? 8}${a.render ? ', render' : ''})`,
   screenshot_url: a => `screenshot_url(${a.url ?? '?'})`,
+  api_services: () => 'api_services()',
+  api_store_key: a => `api_store_key(${a.service ?? '?'})`,
+  api_discover: a => `api_discover(${a.service ?? a.url ?? '?'}${a.filter ? `, "${a.filter}"` : ''})`,
+  api_describe: a => `api_describe(${a.service ? a.service + ' ' : ''}${String(a.method ?? 'GET').toUpperCase()} ${a.path ?? '?'})`,
+  api_request: a => `api_request(${a.service ? a.service + ' ' : ''}${String(a.method ?? (a.body !== undefined ? 'POST' : 'GET')).toUpperCase()} ${a.url ?? '?'}${a.poll ? ', poll' : ''}${a.save_to || a.save_images_dir ? ' → ' + (a.save_to || a.save_images_dir) : ''})`,
   run_subagent: a => `subagent: ${String(a.task ?? '?').slice(0, 60)}`,
   run_subagents: a => `subagents ×${Array.isArray(a.tasks) ? a.tasks.length : 0} (parallel)`,
   verify_visual: a => `verify_visual(${a.path ?? '?'})`,
@@ -1299,7 +1632,7 @@ const DESCRIBERS: Record<string, (a: any) => string> = {
 const GROUPED: [ToolDefinition[], ToolGroup][] = [
   [READ_TOOLS, 'read'], [LSP_TOOLS, 'lsp'], [PLAN_TOOLS, 'plan'],
   [WRITE_TOOLS, 'write'], [PROBE_TOOLS, 'probe'], [RUN_TOOLS, 'run'],
-  [DEBUG_TOOLS, 'debug'], [VISION_TOOLS, 'vision'], [WEB_TOOLS, 'web'], [SUBAGENT_TOOLS, 'subagent'],
+  [DEBUG_TOOLS, 'debug'], [VISION_TOOLS, 'vision'], [WEB_TOOLS, 'web'], [API_TOOLS, 'api'], [SUBAGENT_TOOLS, 'subagent'],
   [LAB_TOOLS, 'lab'],
 ];
 
@@ -1326,6 +1659,8 @@ function groupEnabled(group: ToolGroup, opts: ToolOptions): boolean {
     case 'debug': return !!opts.run && !!opts.debug;
     case 'vision': return !!opts.vision;
     case 'web': return !!opts.web;
+    // External APIs are web access too (files are written only through the write gate).
+    case 'api': return !!opts.web;
     case 'subagent': return !!opts.subagent;
     // Lab experiments execute code, so they follow the run permission.
     case 'lab': return !!opts.run;
@@ -2764,7 +3099,8 @@ export async function executeTool(name: string, rawArgs: string): Promise<string
     return `Invalid JSON arguments for ${name}: ${rawArgs}`;
   }
 
-  log(`Tool call: ${name}(${rawArgs})`);
+  // Never log a credential: api_store_key's arguments carry the raw key.
+  log(name === 'api_store_key' ? `Tool call: ${name}(…)` : `Tool call: ${name}(${rawArgs})`);
   try {
     return await spec.handler(args);
   } catch (err: any) {

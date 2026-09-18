@@ -5,13 +5,36 @@ import { registerActiveEditorTracker } from './editor/contextGatherer';
 import { getPreviewProvider } from './editor/editApplier';
 import { VLLMClient } from './llm/client';
 import { initSecrets } from './utils/secrets';
+import { initApiServices, listApiServices, normalizeServiceName, removeApiService, upsertApiService } from './utils/apiServices';
 import { detectCapabilities } from './utils/capabilities';
+import { registerExecutable, resolveExecutableRoot } from './utils/executables';
+import { invalidateStacks } from './stacks/stacks';
 import { detectContextSize, detectModel } from './utils/serverInfo';
 import { initMcp, disposeMcp } from './mcp/client';
 import { stopAllServers, initTerminalCapture } from './llm/tools';
 import { showMetricsReport } from './utils/metricsReport';
 import { getConfig } from './utils/config';
 import { log } from './utils/logger';
+
+/**
+ * Register the configured Blender install as a discovered executable, so stack
+ * detection can build headless commands with it and running it needs no prompt.
+ * Goes through registerExecutable rather than keeping a second path mechanism:
+ * that is the one channel find_executable, project memory and stacks already read.
+ */
+async function applyBlenderPath(): Promise<void> {
+  const root = getConfig().blenderPath;
+  if (!root) { return; }
+  const found = await resolveExecutableRoot(root, 'blender');
+  if (found) {
+    if (registerExecutable(found, 'blender')) {
+      log(`Blender: using configured install → ${found}`);
+      invalidateStacks();
+    }
+  } else {
+    log(`Blender: codeflare.blenderPath is set but no blender executable was found under "${root}"`);
+  }
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   log('CodeFlare extension activating...');
@@ -35,10 +58,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Load the optional API token from SecretStorage before any requests.
   await initSecrets(context);
+  // Named keys for external web services (PixelLab, …) — see utils/apiServices.
+  await initApiServices(context);
 
   // Probe the host environment once in the background (non-blocking) so the
   // agent knows which runtimes/test tools exist and whether installs are possible.
   detectCapabilities().catch(err => log(`Capability probe failed: ${err.message}`));
+
+  // Register the configured Blender install (non-blocking — it only touches the fs).
+  applyBlenderPath().catch(err => log(`Blender path resolve failed: ${err.message}`));
 
   // Detect the model's context window so we can cap output tokens sensibly.
   detectContextSize(getConfig().endpoint).catch(err => log(`Context probe failed: ${err.message}`));
@@ -127,6 +155,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('codeflare.breakMySolution', async () => {
       await vscode.commands.executeCommand('codeflare.chatView.focus');
       chatProvider.breakMySolution().catch(err => log(`Break My Solution failed: ${err.message}`));
+    }),
+
+    // Store an external-service API key without it ever passing through the chat.
+    vscode.commands.registerCommand('codeflare.addApiService', async () => {
+      const name = await vscode.window.showInputBox({
+        prompt: 'Service name (e.g. pixellab)', ignoreFocusOut: true,
+        validateInput: v => normalizeServiceName(v) ? undefined : 'Use letters, digits, "-", "_" or "."',
+      });
+      if (!name) { return; }
+      const key = await vscode.window.showInputBox({ prompt: `API key for ${name}`, password: true, ignoreFocusOut: true });
+      if (!key) { return; }
+      const baseUrl = await vscode.window.showInputBox({
+        prompt: 'API base URL (optional — leave blank and the agent discovers it)', ignoreFocusOut: true,
+        placeHolder: 'https://api.example.com/v2',
+      });
+      const r = await upsertApiService({ name, baseUrl: baseUrl?.trim() || undefined }, key.trim());
+      if ('error' in r) { vscode.window.showErrorMessage(`CodeFlare: ${r.error}`); return; }
+      vscode.window.showInformationMessage(`CodeFlare: stored the API key for "${r.name}". Ask the chat to use it, e.g. "use ${r.name} to …".`);
+    }),
+
+    vscode.commands.registerCommand('codeflare.removeApiService', async () => {
+      const names = listApiServices().map(m => m.name);
+      if (names.length === 0) { vscode.window.showInformationMessage('CodeFlare: no external API services stored.'); return; }
+      const pick = await vscode.window.showQuickPick(names, { placeHolder: 'Remove which service key?' });
+      if (pick && await removeApiService(pick)) { vscode.window.showInformationMessage(`CodeFlare: removed "${pick}".`); }
     })
   );
 
@@ -163,6 +216,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (e.affectsConfiguration('codeflare.mcpServers')) {
       disposeMcp();
       initMcp(getConfig().mcpServers).catch(err => log(`MCP re-init failed: ${err.message}`));
+    }
+    if (e.affectsConfiguration('codeflare.blenderPath')) {
+      applyBlenderPath().catch(err => log(`Blender path resolve failed: ${err.message}`));
     }
     if (e.affectsConfiguration('codeflare.endpoint') ||
         e.affectsConfiguration('codeflare.provider') ||

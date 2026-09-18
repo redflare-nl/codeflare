@@ -2,6 +2,11 @@ import { ChatMessage } from './client';
 import { EditorContext, buildContextString } from '../editor/contextGatherer';
 import { getCapabilitiesSummary } from '../utils/capabilities';
 import { getConfig } from '../utils/config';
+import { describeApiServices } from '../utils/apiServices';
+import { discoveredPath } from '../utils/executables';
+import { ProblemShape } from './problemShape';
+
+export { ProblemShape, classifyProblem } from './problemShape';
 
 export type CodeAction = 'explain' | 'refactor' | 'fix' | 'test' | 'document';
 
@@ -156,6 +161,97 @@ function reviewBlock(): string {
     `apply here.\n\n`;
 }
 
+// The "problem shape" of THIS turn — set at turn start, cleared after the prompt
+// is built. Drives a proportional reasoning-discipline block. `null` (no strong
+// signal, or a trivial mechanical edit) injects NOTHING, so simple tasks stay
+// fast and pay no extra tokens. The classifier itself lives in the pure,
+// vscode-free problemShape module so it can be unit-tested directly.
+let problemShape: ProblemShape | null = null;
+export function setProblemShape(shape: ProblemShape | null): void {
+  problemShape = shape || null;
+}
+
+/**
+ * Proportional reasoning discipline for the turn's problem shape, or '' when
+ * there is no strong signal (trivial/simple tasks pay nothing). This is the V10
+ * layer: it does not add tools or steps — it tells the model HOW to think about
+ * this class of problem and which existing capability actually earns its cost.
+ * Phrased as discipline an expert applies with judgment, never a mandatory
+ * workflow. The shared header carries the single governing question.
+ */
+function approachBlock(): string {
+  if (!problemShape) { return ''; }
+  const cfg = getConfig();
+  const canMeasure = cfg.agentRunCommands;      // lab / benchmark / run available
+  const canProbe = cfg.agentProbes && cfg.agentEdit;
+  const head =
+    `HOW TO APPROACH THIS — keep it proportional: the goal is the smartest next ` +
+    `action, the one that most reduces uncertainty or advances the solution for the ` +
+    `least cost. Think first for the hard part; for anything genuinely simple, just ` +
+    `do it. Don't manufacture ceremony.\n`;
+
+  if (problemShape === 'debug') {
+    return head +
+      `This is a debugging task, so the cause is uncertain until shown:\n` +
+      `- Form 2-3 competing hypotheses for the cause BEFORE editing; don't commit to ` +
+      `the first plausible one.\n` +
+      `- Pick the cheapest observation that DISTINGUISHES them` +
+      (canProbe ? ` — often one or two probes on the exact line, then read the numbers` : ``) +
+      `. Reading another thousand lines is not that observation.\n` +
+      `- When practical, REPRODUCE the failure first, then fix, then re-run the SAME ` +
+      `reproduction and confirm it no longer fails — that, not a clean build, is proof.\n` +
+      `- If an observation contradicts your leading hypothesis, drop it and move to the ` +
+      `next — do not keep attacking the same failed angle or bend the evidence to fit.\n\n`;
+  }
+  if (problemShape === 'perf') {
+    return head +
+      `This is a performance task, so measure — a claimed speedup without numbers is ` +
+      `an unverified change:\n` +
+      (canMeasure
+        ? `- Establish a BASELINE on a representative workload first (lab_benchmark / ` +
+          `lab_profile), then find the ACTUAL hot path — optimize what the profile ranks, ` +
+          `not what merely looks inefficient.\n`
+        : `- Reason explicitly about where the time/memory actually goes (the hot path), ` +
+          `not what merely looks inefficient.\n`) +
+      `- Consider more than one approach (better algorithm, cache, fewer allocations, ` +
+      `batch, different data structure, move work off the hot path) and weigh benefit ` +
+      `vs. complexity and risk before committing.\n` +
+      (canMeasure
+        ? `- After the change, benchmark again and report the before→after; keep it only ` +
+          `if it is measurably better AND lab_diff_test shows behaviour is unchanged.\n`
+        : `- Preserve behaviour; state the expected win concretely (what work is removed), ` +
+          `and mark it unmeasured rather than claiming a number you didn't measure.\n`) +
+      `- Don't trade readability for a micro-optimization the evidence doesn't justify.\n\n`;
+  }
+  if (problemShape === 'puzzle') {
+    return head +
+      `This is an algorithmic/reasoning problem — runtime probes are often irrelevant ` +
+      `here; the leverage is in the reasoning:\n` +
+      `- Decompose it; state the invariant(s) the solution must preserve and the ` +
+      `constraints (sizes, ranges, time/space budget).\n` +
+      `- Reason about correctness with concrete edge cases and, when a candidate looks ` +
+      `right, actively search for a COUNTEREXAMPLE before trusting it.\n` +
+      `- Compare algorithms by complexity when it matters; pick the simplest one that ` +
+      `meets the constraints.\n` +
+      (canMeasure
+        ? `- Verify with a small executable check (lab_run over hand-picked and edge ` +
+          `inputs; lab_diff_test against a brute-force reference when one is cheap).\n`
+        : `- Verify by tracing the tricky inputs and the boundaries by hand.\n`) + `\n`;
+  }
+  // reason (architecture / substantial change)
+  return head +
+    `This is a substantial/architectural change, so understand before you move it:\n` +
+    `- First understand WHY the current design is the way it is — coupling, ownership, ` +
+    `the interfaces and callers, the impact radius. Read for that, not for everything.\n` +
+    `- Consider more than one design and weigh them on correctness, migration cost, ` +
+    `risk, and future complexity — a good refactor REDUCES future complexity; a bad ` +
+    `one just moves it around. Prefer the smallest design that solves the real problem; ` +
+    `no abstraction without a concrete payoff.\n` +
+    `- After implementing, attack your own solution: edge cases, hidden assumptions, ` +
+    `lifecycle/state, and regressions in the existing callers — verify behaviour is ` +
+    `preserved before you call it done.\n\n`;
+}
+
 /** Ambiguity gate + grounding evidence for the prompt, or '' when disabled. */
 function groundingBlock(): string {
   if (!getConfig().clarifyAmbiguity) { return ''; }
@@ -292,6 +388,81 @@ keep only if measurably better AND behaviourally identical.
 `;
 }
 
+/**
+ * Headless Blender for mesh/STL generation. Only emitted when Blender is
+ * actually available (configured path or discovered binary) AND commands may
+ * run — otherwise every ordinary turn would pay for advice it cannot act on.
+ * The API note is load-bearing: `bpy.ops.export_mesh.stl` is the legacy add-on
+ * operator most models reach for, and `wm.stl_export` is the current one.
+ */
+function blenderBlock(): string {
+  const config = getConfig();
+  if (!config.agentRunCommands) { return ''; }
+  const found = discoveredPath('blender');
+  if (!found && !config.blenderPath) { return ''; }
+  const exe = found ? `"${found}"` : 'blender';
+  return `
+3D MESH GENERATION WITH BLENDER (headless): generate geometry by writing a Python
+script and running Blender on it — never by hand-writing mesh file bytes.
+- Run it: ${exe} --background --python <script>.py
+  (quote the path; --background means no GUI/window ever opens.)
+- Write the script with create_file so it is reviewable and checkpointed, then run
+  it with run_command. Keep the script in the project, not in the lab: it is the
+  source of the asset, not a scratch experiment.
+- Export STL with bpy.ops.wm.stl_export(filepath=...) — the CURRENT operator.
+  Do NOT use bpy.ops.export_mesh.stl(...): that is the legacy add-on, deprecated
+  and not enabled by default in Blender 4.2+.
+- Start every script from a known-empty scene; a fresh Blender has a default cube
+  that silently ends up in your export:
+    bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete()
+- Use an ABSOLUTE output path (or one derived from the script's own location).
+  Blender's working directory is not reliably the workspace root.
+- Build shapes from bpy.ops.mesh.primitive_*_add plus modifiers/booleans, or from
+  bmesh for exact control. Set dimensions explicitly — Blender units are metres
+  by default, so a "20mm" part is 0.02 unless you say otherwise. State the unit
+  convention you used in your final answer.
+- Every STL you produce is AUTOMATICALLY checked (triangle count, bounding box,
+  degenerate faces, watertightness) and the measured geometry comes back to you.
+  Report those numbers — and the unit convention — in your final answer rather
+  than claiming the shape is correct. An empty STL is the normal failure mode: it
+  means the export ran before the geometry existed, or with nothing selected.
+- "Watertight" (every edge shared by exactly two faces) is what makes a mesh
+  printable. An open mesh is fine for a surface/plane but wrong for a solid part.
+`;
+}
+
+/**
+ * How to use an external web API the user hands over a key for. Only when web
+ * access is on (the api_* tools live in that permission group); lists the
+ * configured services by name so the model knows what it can call.
+ */
+function apiBlock(): string {
+  const config = getConfig();
+  if (!config.webAccess) { return ''; }
+  const services = describeApiServices();
+  return `
+EXTERNAL WEB APIs (api_* tools): when the user hands you an API key for a web service
+("here is my PixelLab key …"), use that service END-TO-END yourself — do not ask the user
+to read the docs for you:
+1. api_store_key(service, key, base_url?) — store it ONCE, encrypted. Never write a key into
+   a file, a command or a reply, and never ask for it again — call the service by name.
+2. api_discover(service, url?) — find + cache the OpenAPI spec and get the endpoint index.
+   Unknown API host? web_search "<service> API documentation" first and pass the docs/API
+   URL. Use filter:"<keyword>" to narrow a big index.
+3. api_describe(service, method, path) — the exact fields/enums of the ONE operation you
+   will call. Never guess parameter names or enum values.
+4. api_request(service, method, path, body, save_to | save_images_dir) — the key is injected.
+   Binary responses and base64 images in JSON are written to workspace files (put generated
+   assets under assets/); {"$file":"path.png"} in the body sends a workspace image as base64.
+   Asynchronous jobs (a response with a job id + status) → wait on their status endpoint in
+   ONE call with poll:{…}, then fetch/save the result. A 4xx body tells you what to fix.
+5. Finish like any generated asset: list the saved image paths in your final answer (they
+   are previewed + pixel-checked) and verify_visual them when the look matters. Report the
+   usage/credits the calls consumed when the API returns it.
+${services ? `Configured services (keys stored):\n${services}` : 'No external services configured yet.'}
+`;
+}
+
 function operatorBlock(): string {
   return `
 OPERATOR RESPONSIBILITY: CodeFlare is a local developer tool controlled entirely by
@@ -343,6 +514,7 @@ export function buildSystemPrompt(context: EditorContext, action?: CodeAction): 
   }
 
   prompt += reviewBlock();
+  prompt += approachBlock();
   prompt += groundingBlock();
 
   prompt += `You are CodeFlare, a coding agent inside VSCode.
@@ -427,7 +599,7 @@ This is not only for web pages: for ANY visual output — a generated plot (save
 with savefig), a game or app (use its own screenshot-to-PNG), a rendered scene — produce
 an image and call verify_visual(path, expectation) to have the model SEE whether it matches
 the goal, then fix what it reports. Do not claim a visual result is correct without looking.
-${operatorBlock()}${pentestBlock()}${probesBlock()}${labBlock()}${capabilitiesBlock()}
+${operatorBlock()}${pentestBlock()}${probesBlock()}${labBlock()}${blenderBlock()}${apiBlock()}${capabilitiesBlock()}
 Call these tools whenever you need more context than what is shown above —
 for example to inspect a file the user mentions but that isn't open. Explore
 first, then act. Do not guess file contents you can read.
