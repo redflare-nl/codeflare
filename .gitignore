@@ -6,7 +6,9 @@ dist/
 .codeflare/
 .codeflare-trash/
 
-# Per-machine Claude Code settings (the shared .claude/settings.json IS committed)
+# Per-machine Claude Code settings — machine-specific (local endpoints, model
+# names, absolute paths to other projects) and not meant for a public repo.
+.claude/settings.json
 .claude/settings.local.json
 
 # Editor/OS noise

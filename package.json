@@ -4,6 +4,13 @@
   "description": "AI coding assistant for local (OpenAI-compatible), OpenAI, and Claude backends",
   "version": "1.40.0",
   "publisher": "local",
+  "license": "MIT",
+  "author": {
+    "name": "Redflare",
+    "email": "info@redflare.nl",
+    "url": "https://www.redflare.nl"
+  },
+  "homepage": "https://www.redflare.nl",
   "engines": {
     "vscode": "^1.85.0"
   },
