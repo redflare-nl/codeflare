@@ -10,7 +10,14 @@
     "email": "info@redflare.nl",
     "url": "https://www.redflare.nl"
   },
-  "homepage": "https://www.redflare.nl",
+  "homepage": "https://github.com/Redflare/codeflare#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Redflare/codeflare.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Redflare/codeflare/issues"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
