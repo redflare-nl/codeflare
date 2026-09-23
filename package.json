@@ -556,7 +556,7 @@
         "codeflare.contextAutoCompact": {
           "type": "boolean",
           "default": true,
-          "description": "When the conversation grows large, summarize older turns into a compact note and keep recent turns verbatim (like Claude Code's context compaction)"
+          "description": "When the conversation grows large, summarize older turns into a compact note and keep recent turns verbatim"
         },
         "codeflare.contextCompactThreshold": {
           "type": "number",
