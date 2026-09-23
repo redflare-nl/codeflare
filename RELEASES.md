@@ -88,7 +88,10 @@ against 5.1).
 
 ---
 
-## v1.37.0
+## v1.37.0 — earlier work (no download)
+
+Kept here for context; there is no published `.vsix` for this version, and its
+features are all included in v1.40.0 above.
 
 The evidence-driven engineering runtime — the release that made CodeFlare verify
 its own work rather than report that it finished.
