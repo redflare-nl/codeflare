@@ -4,6 +4,16 @@ An agentic AI coding assistant for VS Code that runs a full **edit → diagnose 
 
 CodeFlare's design principle: **the model is the brain; CodeFlare provides the eyes, hands, and feedback.** It offers capabilities (read/edit files, run commands, verify, debug) deterministically; the model decides which to use and in what order.
 
+## Install
+
+Download the latest `.vsix` from the [**Releases page**](../../releases) and install it with **Extensions → … → Install from VSIX…**, or:
+
+```
+code --install-extension codeflare-1.40.0.vsix
+```
+
+Then reload the window (**Developer: Reload Window**). See [RELEASES.md](RELEASES.md) for what's in each version. Updating is manual — a `.vsix` installed from a file isn't tracked by a marketplace, so VS Code won't offer updates.
+
 ---
 
 ## Providers
@@ -116,3 +126,9 @@ Local, git-ignorable, never shipped in the extension:
 - A reachable backend: an OpenAI-compatible server for `local`, or an API token for OpenAI/Anthropic.
 - For the verify gate / debugger: the project's own toolchain (npm, tsc, pytest, go, cargo, dotnet, gradle, a Godot binary, …). CodeFlare never invents a build strategy or installs tools — it uses what the project already defines.
 - For 3D/STL generation: Blender 4.2 or newer (tested against 5.1), located via `codeflare.blenderPath`.
+
+## License
+
+[MIT](LICENSE) — free to use, modify and distribute, including commercially, as long as the copyright notice and licence text travel with it.
+
+Built by [Redflare](https://www.redflare.nl).
