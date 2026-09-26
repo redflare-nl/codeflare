@@ -253,8 +253,11 @@ export class VLLMClient {
   constructor(private readonly target?: ClientTarget) {}
 
   private config(): CodeFlareConfig {
-    const config = this.config();
-    return this.target ? { ...config, ...this.target } : config;
+    // Named `base`, not `config`: a blanket rename of `const config = getConfig()`
+    // once turned this line into `this.config()` and every model call overflowed
+    // the stack. The live settings come from getConfig(); only the target overrides.
+    const base = getConfig();
+    return this.target ? { ...base, ...this.target } : base;
   }
 
   /** "provider:model" of what this client actually calls (for labels and logs). */

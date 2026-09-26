@@ -17,6 +17,12 @@ Reload the window afterwards (**Developer: Reload Window**) to activate it.
 
 ---
 
+## v1.42.1
+
+**Hotfix — install this instead of v1.42.0.** In v1.42.0 every model call failed with *"Maximum call stack size exceeded"*: the client's settings accessor called itself after a blanket rename during the independent-judge work. No test exercised a client method, so it shipped. Fixed, and a regression test now constructs the client and reads its configuration. Nothing else changed.
+
+---
+
 ## v1.42.0
 
 Persistent memory now tracks evidence, uncertainty and revision history across projects.

@@ -2,7 +2,7 @@
   "name": "codeflare",
   "displayName": "CodeFlare",
   "description": "AI coding assistant for local (OpenAI-compatible), OpenAI, and Claude backends",
-  "version": "1.42.0",
+  "version": "1.42.1",
   "publisher": "local",
   "license": "MIT",
   "author": {
