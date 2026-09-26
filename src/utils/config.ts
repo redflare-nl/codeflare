@@ -129,6 +129,25 @@ export interface CodeFlareConfig {
   maxContextChars: number;
   agentMode: boolean;
   agentMaxSteps: number;
+  maxParallelAgents: number;
+  autonomousMode: boolean;
+  autoTest: boolean;
+  memoryEmbeddingModel: string;
+  /** Independent judge: '' = the worker reviews itself (previous behaviour). */
+  judgeProvider: Provider | '';
+  judgeEndpoint: string;
+  judgeModel: string;
+  /** When memory reflection runs: only on request, or after each completed mission. */
+  memoryReflection: 'manual' | 'after-mission';
+  /** Per-field overrides on the autonomous mission budget (0 = unlimited). */
+  missionBudget: Record<string, unknown>;
+  /** Fraction of autonomous missions in which an eligible skill is deliberately withheld (control trial). */
+  skillHoldoutRate: number;
+  /** Backlog items one Night Shift run may work through. */
+  nightShiftMaxItems: number;
+  selfImprovement: 'off' | 'suggest' | 'automatic';
+  selfUpdateKnownGoodVsix: string;
+  selfUpdateCli: string;
   agentEdit: boolean;
   confirmEdits: boolean;
   editSearchMaxLines: number;
@@ -203,6 +222,35 @@ export function getConfig(): CodeFlareConfig {
     maxContextChars: cfg.get<number>('maxContextChars', 32000),
     agentMode: cfg.get<boolean>('agentMode', true),
     agentMaxSteps: cfg.get<number>('agentMaxSteps', 25),
+    maxParallelAgents: (() => {
+      const value = cfg.get<number>('maxParallelAgents', 32);
+      return Number.isFinite(value) ? Math.max(1, Math.min(32, Math.floor(value))) : 32;
+    })(),
+    autonomousMode: cfg.get<boolean>('autonomousMode', false),
+    autoTest: cfg.get<boolean>('autoTest', false),
+    memoryEmbeddingModel: cfg.get<string>('memoryEmbeddingModel', '').trim(),
+    judgeProvider: (() => {
+      const v = (cfg.get<string>('judgeProvider', '') || '').trim();
+      return v === 'local' || v === 'openai' || v === 'anthropic' ? v : '';
+    })(),
+    judgeEndpoint: (cfg.get<string>('judgeEndpoint', '') || '').trim(),
+    judgeModel: (cfg.get<string>('judgeModel', '') || '').trim(),
+    memoryReflection: cfg.get<string>('memoryReflection', 'manual') === 'after-mission' ? 'after-mission' : 'manual',
+    missionBudget: cfg.get<Record<string, unknown>>('missionBudget', {}) || {},
+    skillHoldoutRate: (() => {
+      const v = Number(cfg.get<number>('skillHoldoutRate', 0.1));
+      return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
+    })(),
+    nightShiftMaxItems: (() => {
+      const v = Number(cfg.get<number>('nightShiftMaxItems', 1));
+      return Number.isInteger(v) && v >= 1 && v <= 10 ? v : 1;
+    })(),
+    selfImprovement: (() => {
+      const value = cfg.get<string>('selfImprovement', 'suggest');
+      return value === 'off' || value === 'automatic' ? value : 'suggest';
+    })(),
+    selfUpdateKnownGoodVsix: cfg.get<string>('selfUpdateKnownGoodVsix', ''),
+    selfUpdateCli: cfg.get<string>('selfUpdateCli', 'code'),
     agentEdit: cfg.get<boolean>('agentEdit', true),
     confirmEdits: cfg.get<boolean>('confirmEdits', false),
     editSearchMaxLines: cfg.get<number>('editSearchMaxLines', 60),

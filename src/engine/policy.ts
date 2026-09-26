@@ -85,6 +85,97 @@ export const DEFAULT_FORBIDDEN_PATHS = [
 ];
 
 /**
+ * The files that ARE the safety boundary of this runtime: policy and its gate,
+ * evidence and acceptance, isolation, write ownership, and the self-update /
+ * recovery path. A system that may modify itself must not be able to loosen
+ * these as part of an "improvement" — the prompt asks the model to preserve
+ * them, but a prompt is a request, not a lock.
+ *
+ * Deliberately NOT included: tools.ts and config.ts (the command-trust list
+ * lives there). Those are the normal improvement surface; forbidding them
+ * would make most self-improvement impossible. That gap is documented, not
+ * hidden: trust-list changes still pass through the reviewed-commit path.
+ *
+ * Relative to the CodeFlare repository root. Enforced in three layers:
+ *   1. the turn gate (file tools cannot write them — checkPath),
+ *   2. the command gate (run_command cannot write or commit them — checkGuardrailCommand),
+ *   3. selfUpdate.prepare() (a candidate whose guardrails differ from the trusted
+ *      anchor is refused unless the operator approves in a modal).
+ */
+export const GUARDRAIL_PATHS = [
+  'src/engine/policy.ts', 'src/engine/policyGate.ts',
+  'src/engine/evidence.ts', 'src/engine/experiment.ts',
+  'src/engine/verificationConfig.ts', 'src/engine/gitIsolation.ts', 'src/engine/agentScope.ts',
+  'src/engine/selfUpdate.ts', 'src/engine/selfUpdateArchive.ts', 'src/engine/selfUpdateCommands.ts',
+  'scripts/self-update-recovery.cjs', 'scripts/self-update-smoke.cjs',
+];
+
+/** True when `relPath` (any slash style, optional ./) is one of the guardrail files. */
+export function isGuardrailPath(relPath: string): boolean {
+  const p = (relPath || '').replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
+  return GUARDRAIL_PATHS.some(g => g.toLowerCase() === p);
+}
+
+// Leading words that only READ. A command starting with one of these may name a
+// guardrail file (the model must be able to inspect what it may not change).
+const READ_ONLY_LEADERS = new Set([
+  'cat', 'type', 'head', 'tail', 'more', 'less', 'wc', 'grep', 'rg', 'findstr', 'select-string',
+  'get-content', 'gc', 'diff', 'fc', 'stat', 'ls', 'dir', 'get-item', 'get-childitem', 'test-path',
+]);
+const READ_ONLY_GIT_RE = /^git\s+(?:diff|show|log|blame|status|ls-files|grep)\b/i;
+// Git verbs that move HEAD or rewrite the tree. In guardrail mode these are
+// refused outright: committing a guardrail edit would make it the "baseline"
+// the self-update check compares against.
+const HEAD_MOVING_GIT_RE = /\bgit\s+(?:commit|add|apply|am|cherry-pick|checkout|switch|restore|reset|revert|stash|mv|rm|merge|rebase|pull)\b/i;
+
+/**
+ * Guardrail-mode command check: a shell command may not name a guardrail file
+ * unless it plainly only reads, and may not move git HEAD at all. Deterministic
+ * and intentionally coarse — false positives cost a refused command, false
+ * negatives cost the safety boundary. Applied in addition to checkCommand.
+ */
+export function checkGuardrailCommand(command: string): PolicyVerdict {
+  const raw = (command || '').trim();
+  if (!raw) { return OK; }
+  if (HEAD_MOVING_GIT_RE.test(raw)) {
+    return {
+      allowed: false, code: 'COMMAND_BLOCKED',
+      reason: 'git operations that change the tree or HEAD are not permitted while guardrails are locked (commit/add/apply/checkout/reset/…)',
+    };
+  }
+  const lowered = raw.replace(/\\/g, '/').toLowerCase();
+  const named = GUARDRAIL_PATHS.filter(g => {
+    const full = g.toLowerCase();
+    const base = full.slice(full.lastIndexOf('/') + 1);
+    return lowered.includes(full) || lowered.includes(base);
+  });
+  if (named.length === 0) { return OK; }
+  // A pipeline/chain is judged per segment: `cat policy.ts && echo x > policy.ts`
+  // is a write. Only the segments that NAME a guardrail file are judged — a
+  // leading `cd src/engine` mentions nothing and must not poison a later read.
+  const mentioned = named.map(g => {
+    const full = g.toLowerCase();
+    return [full, full.slice(full.lastIndexOf('/') + 1)];
+  });
+  const segments = raw.split(/\s*(?:&&|\|\||;|\||\n)\s*/).filter(Boolean);
+  const readOnly = segments.every(seg => {
+    const s = seg.trim().replace(/^\(+\s*/, '');
+    const l = s.replace(/\\/g, '/').toLowerCase();
+    if (!mentioned.some(([full, base]) => l.includes(full) || l.includes(base))) { return true; }
+    if (READ_ONLY_GIT_RE.test(s)) { return true; }
+    const leader = (s.match(/^[\w.-]+/) || [''])[0].toLowerCase();
+    // Output redirection turns any read into a write.
+    return READ_ONLY_LEADERS.has(leader) && !/[^<]>|>>/.test(s);
+  });
+  if (readOnly) { return OK; }
+  return {
+    allowed: false, code: 'PATH_FORBIDDEN',
+    reason: `this command names guardrail file(s) ${named.map(n => `"${n}"`).join(', ')} in a way that may modify them; ` +
+      'guardrails are locked for this task (read them with cat/grep/git diff if needed)',
+  };
+}
+
+/**
  * Minimal glob matcher: `**` crosses directories, `*` within a segment, `?`
  * one char. Case-insensitive (Windows). Paths are compared with forward
  * slashes; a pattern without a slash also matches by basename (so

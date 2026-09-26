@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ChatViewProvider } from './chat/chatViewProvider';
 import { registerCodeActions } from './editor/codeActions';
 import { registerActiveEditorTracker } from './editor/contextGatherer';
 import { getPreviewProvider } from './editor/editApplier';
 import { VLLMClient } from './llm/client';
-import { initSecrets } from './utils/secrets';
+import { initSecrets, getApiKey } from './utils/secrets';
 import { initApiServices, listApiServices, normalizeServiceName, removeApiService, upsertApiService } from './utils/apiServices';
 import { detectCapabilities } from './utils/capabilities';
 import { registerExecutable, resolveExecutableRoot } from './utils/executables';
@@ -15,6 +16,11 @@ import { stopAllServers, initTerminalCapture } from './llm/tools';
 import { showMetricsReport } from './utils/metricsReport';
 import { getConfig } from './utils/config';
 import { log } from './utils/logger';
+import { registerSelfUpdateCommands, acknowledgeRegisteredSelfUpdate } from './engine/selfUpdateCommands';
+import { MemoryService } from './engine/memoryService';
+import { createMemoryEmbedder } from './engine/memoryEmbeddings';
+import { clearProjectMemory, configureProjectMemory, loadProjectMemory, rememberFact } from './utils/projectMemory';
+import { localStoragePath } from './utils/storagePath';
 
 /**
  * Register the configured Blender install as a discovered executable, so stack
@@ -90,10 +96,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Create the chat panel provider (opens on the right via editor title icon)
   const version: string = context.extension.packageJSON.version;
-  const chatProvider = new ChatViewProvider(context.extensionUri, version, context.workspaceState);
+  const projectRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+  configureProjectMemory(context.storageUri, projectRoot);
+  // Let VS Code determine profile/host/workspace identity; never derive memory
+  // paths from the repository or silently mix private workspace data globally.
+  const globalStorage = localStoragePath(context.globalStorageUri);
+  const workspaceStorage = localStoragePath(context.storageUri);
+  const knowledge = globalStorage ? new MemoryService(
+    workspaceStorage ? path.join(workspaceStorage, 'memory', 'project') : undefined,
+    path.join(globalStorage, 'memory', 'agent'),
+    projectRoot?.scheme === 'file' ? projectRoot.fsPath : undefined,
+    { projectFacts: loadProjectMemory, clearProjectFacts: clearProjectMemory, rememberProjectFact: rememberFact, embedder: () => {
+      const config = getConfig();
+      if (!config.memoryEmbeddingModel) { return undefined; }
+      if (config.provider === 'anthropic') { throw new Error('Choose a local or OpenAI-compatible provider for memory embeddings.'); }
+      return createMemoryEmbedder({ endpoint: config.endpoint, model: config.memoryEmbeddingModel, apiKey: getApiKey(config.provider) });
+    } },
+  ) : undefined;
+  if (!knowledge) {
+    // Name the actual scheme: a bare "unavailable" gives no way to tell a remote
+    // or virtual workspace from a storage location VS Code never provided.
+    log(`Skill memory unavailable: global extension storage is not on this machine's filesystem ` +
+      `(globalStorage=${context.globalStorageUri.scheme}, workspaceStorage=${context.storageUri?.scheme ?? 'none'}).`);
+  } else if (!workspaceStorage) {
+    // Global memory works, project memory does not — worth saying, since the
+    // settings panel will show project actions disabled.
+    log(`Project memory unavailable (no workspace storage); reusable agent memory is active.`);
+  }
+  const chatProvider = new ChatViewProvider(context.extensionUri, version, context.workspaceState, knowledge);
+  registerSelfUpdateCommands(context, chatProvider);
 
   // Register commands
   context.subscriptions.push(
+    vscode.commands.registerCommand('codeflare.memoryStatus', async (options?: { quiet?: boolean }) => {
+      if (!knowledge) { throw new Error('Memory service requires file-backed extension storage.'); }
+      const status = await knowledge.status();
+      if (!options?.quiet) {
+        vscode.window.showInformationMessage(`CodeFlare memory: ${status.globalSkills} global skills, ${status.projectSkills} project skills, ${status.episodes} project observations. SQLite storage is ready.`);
+      }
+      return status;
+    }),
+    vscode.commands.registerCommand('codeflare.reflectMemory', () => chatProvider.reflectMemory('manual')),
+    vscode.commands.registerCommand('codeflare.nightShift', () => chatProvider.runNightShift()),
+    vscode.commands.registerCommand('codeflare.showBacklog', () => chatProvider.showBacklog()),
     vscode.commands.registerCommand('codeflare.openChat', () => {
       chatProvider.togglePanel();
     }),
@@ -229,6 +274,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }));
 
   log('CodeFlare extension activated');
+  await acknowledgeRegisteredSelfUpdate(context).catch(error => log(`Self-update acknowledgement failed: ${error.message}`));
 }
 
 export function deactivate(): void {

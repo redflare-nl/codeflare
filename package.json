@@ -2,7 +2,7 @@
   "name": "codeflare",
   "displayName": "CodeFlare",
   "description": "AI coding assistant for local (OpenAI-compatible), OpenAI, and Claude backends",
-  "version": "1.40.0",
+  "version": "1.42.0",
   "publisher": "local",
   "license": "MIT",
   "author": {
@@ -72,6 +72,22 @@
         "title": "CodeFlare: Clear Chat"
       },
       {
+        "command": "codeflare.memoryStatus",
+        "title": "CodeFlare: Memory Status"
+      },
+      {
+        "command": "codeflare.reflectMemory",
+        "title": "CodeFlare: Reflect on Experience (distil recorded experiments into candidate skills)"
+      },
+      {
+        "command": "codeflare.nightShift",
+        "title": "CodeFlare: Night Shift (work the evidence-derived backlog autonomously)"
+      },
+      {
+        "command": "codeflare.showBacklog",
+        "title": "CodeFlare: Show Backlog (self-derived goals)"
+      },
+      {
         "command": "codeflare.checkHealth",
         "title": "CodeFlare: Check VLLM Health"
       },
@@ -102,6 +118,26 @@
       {
         "command": "codeflare.removeApiService",
         "title": "CodeFlare: Remove External Service API Key"
+      },
+      {
+        "title": "CodeFlare: Resume Mission",
+        "command": "codeflare.resumeMission"
+      },
+      {
+        "title": "CodeFlare: Improve CodeFlare",
+        "command": "codeflare.improveSelf"
+      },
+      {
+        "title": "CodeFlare: Prepare and Validate Self-update",
+        "command": "codeflare.prepareSelfUpdate"
+      },
+      {
+        "title": "CodeFlare: Activate Validated Self-update",
+        "command": "codeflare.activateSelfUpdate"
+      },
+      {
+        "title": "CodeFlare: Save Mission and Reload",
+        "command": "codeflare.reloadSafely"
       }
     ],
     "menus": {
@@ -674,6 +710,105 @@
               "command"
             ]
           }
+        },
+        "codeflare.maxParallelAgents": {
+          "minimum": 1,
+          "description": "Maximum simultaneous subagents across a mission (1–32). Extra tasks wait in a shared queue. Shared workspace writes are coordinated; the parent verifies integration.",
+          "default": 32,
+          "maximum": 32,
+          "type": "integer"
+        },
+        "codeflare.autonomousMode": {
+          "description": "Carry out the task with a persistent mission, proportional research, acceptance criteria and a separate test/repair stage. Skips plan approval, preserves command/path permissions and budgets.",
+          "default": false,
+          "type": "boolean"
+        },
+        "codeflare.autoTest": {
+          "description": "After implementation, start a separate agent to write and execute relevant tests against the original request. Autonomous mode always enables this stage.",
+          "default": false,
+          "type": "boolean"
+        },
+        "codeflare.judgeProvider": {
+          "type": "string",
+          "enum": ["", "local", "openai", "anthropic"],
+          "enumDescriptions": [
+            "No independent judge: the working model reviews its own output (default).",
+            "A local OpenAI-compatible server reviews the work.",
+            "OpenAI reviews the work (uses the OpenAI API token).",
+            "Anthropic reviews the work (uses the Anthropic API token)."
+          ],
+          "default": "",
+          "markdownDescription": "Provider of an **independent judge** that reviews the worker's output: requirement review, *Prove It*, *Break My Solution* and memory reflection run on this model instead of the one that did the work. A judge that resolves to exactly the working model is treated as absent — the same weights cannot independently review themselves."
+        },
+        "codeflare.judgeEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Judge API base URL. Blank = the judge provider's default endpoint."
+        },
+        "codeflare.judgeModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Judge model name. Blank = the provider's default. **Set this explicitly when the judge is a local server other than the working one** — auto-discovery only knows the working server's model."
+        },
+        "codeflare.missionBudget": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Ceilings for one **autonomous mission** as a whole (all its turns, fix rounds and test stage). Keys: `maxTurns` (12), `maxToolCalls` (600), `maxTokens` (1500000), `maxWallMs` (5400000 = 90 min), `maxStalledTurns` (3 — consecutive turns that changed no file and produced no passing evidence). `0` = unlimited. A mission that hits a ceiling is paused with the reason; interactive missions are not limited.",
+          "properties": {
+            "maxTurns": { "type": "number" }, "maxToolCalls": { "type": "number" }, "maxTokens": { "type": "number" },
+            "maxWallMs": { "type": "number" }, "maxStalledTurns": { "type": "number" }
+          }
+        },
+        "codeflare.skillHoldoutRate": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "markdownDescription": "Causal skill validation. In this fraction of **autonomous** missions an eligible stored skill is deliberately *withheld* from the prompt and the mission's outcome is recorded as a **control trial**. Comparing outcomes with and without the skill is what turns \"the mission passed while the skill was recalled\" into evidence that the skill helped. `0` disables holdouts; interactive turns never withhold."
+        },
+        "codeflare.nightShiftMaxItems": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 10,
+          "markdownDescription": "How many backlog goals one **CodeFlare: Night Shift** run may work through, each as its own autonomous mission under the mission budget. Goals are derived from evidence by reflection (recurring failures, contradictions, unaccepted missions); Night Shift requires a non-interactive `codeflare.autonomyProfile` so nothing waits on a prompt."
+        },
+        "codeflare.memoryReflection": {
+          "type": "string",
+          "enum": ["manual", "after-mission"],
+          "enumDescriptions": [
+            "Only when you run CodeFlare: Reflect on Experience (or the Memory tab button).",
+            "Also automatically after a completed mission, once enough new experiments were recorded."
+          ],
+          "default": "manual",
+          "markdownDescription": "When the memory **reflection** pass runs. Reflection reads recorded experiments and proposes *candidate* skills and constraints; it never validates anything itself — candidates still have to prove themselves in a later mission."
+        },
+        "codeflare.memoryEmbeddingModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional embedding model for memory retrieval through the active local/OpenAI-compatible provider endpoint. Enabling sends memory snippets and task text to that provider. Blank uses local lexical retrieval with no embedding requests. Anthropic does not support this endpoint."
+        },
+        "codeflare.selfImprovement": {
+          "description": "Controls the Improve CodeFlare command. Suggest prepares and validates a candidate; automatic may install and reload at a saved, idle point when a known-good rollback package is configured. Does not change model weights.",
+          "enum": [
+            "off",
+            "suggest",
+            "automatic"
+          ],
+          "default": "suggest",
+          "type": "string"
+        },
+        "codeflare.selfUpdateKnownGoodVsix": {
+          "description": "Absolute path to a tested, known-good CodeFlare VSIX retained for independent rollback before activating a self-update.",
+          "default": "",
+          "scope": "machine",
+          "type": "string"
+        },
+        "codeflare.selfUpdateCli": {
+          "description": "VS Code CLI executable for self-update installation. Must target the same VS Code installation/extension host as this extension.",
+          "default": "code",
+          "scope": "machine",
+          "type": "string"
         }
       }
     }
@@ -683,19 +818,22 @@
     "watch": "node esbuild.js --watch",
     "vscode:prepublish": "npm run build",
     "package": "npx @vscode/vsce package",
-    "postpackage": "node deploy.js",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "deploy": "node deploy.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.27.3",
     "pdfjs-dist": "^4.10.38",
     "typescript": "^5.4.0",
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "pdfkit": "^0.19.1"
+    "pdfkit": "^0.19.1",
+    "sql.js": "^1.14.2"
   }
 }

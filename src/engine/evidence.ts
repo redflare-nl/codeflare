@@ -39,6 +39,8 @@ export interface EvidenceItem {
   type: EvidenceType;
   /** Tool or gate that produced it (e.g. 'run_command', 'gate:diagnostics'). */
   source: string;
+  /** Stable identity of a re-runnable check; a later result supersedes its earlier verdict. */
+  checkId?: string;
   ts: number;
   /** Order relative to the first file mutation of the turn. */
   phase: EvidencePhase;
@@ -76,10 +78,17 @@ export function makeEvidence(
  * this is the boundary that keeps "build passed" from becoming "verified".
  */
 export function isBehavioral(item: EvidenceItem): boolean {
-  return item.type === 'RUNTIME' || item.type === 'VISUAL_COMPARISON' ||
+  return item.type === 'TEST' || item.type === 'RUNTIME' || item.type === 'VISUAL_COMPARISON' ||
     item.type === 'PROBE' || item.type === 'DEBUGGER' || item.type === 'BENCHMARK' ||
     item.type === 'PROPERTY_TEST' || item.type === 'DIFFERENTIAL_TEST' ||
     item.type === 'FUZZ' || item.type === 'COUNTEREXAMPLE';
+}
+
+/** Keep historical evidence for audit, but judge a repeated check by its latest result. */
+export function currentEvidence(items: EvidenceItem[]): EvidenceItem[] {
+  const latest = new Map<string, EvidenceItem>();
+  for (const item of items) { if (item.checkId) { latest.set(item.checkId, item); } }
+  return items.filter(item => !item.checkId || latest.get(item.checkId) === item);
 }
 
 /** Dependency-install side effect (modifies manifests outside the turn diff). */
@@ -219,6 +228,7 @@ export interface VerificationSummary {
 
 /** Summarize what the evidence actually demonstrates. Never inflates. */
 export function verificationSummary(items: EvidenceItem[]): VerificationSummary {
+  items = currentEvidence(items);
   const behavioralItems = items.filter(isBehavioral);
   const checkItems = items.filter(i => !isBehavioral(i));
   const measured = behavioralItems.some(i =>

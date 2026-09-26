@@ -26,6 +26,219 @@
   let currentContent = '';
   let thinkContent = '';
 
+  // The host owns mission state. Tool activity and token streaming never imply
+  // a phase transition: the footer also survives transcript clears and reloads.
+  const MISSION_PHASES = [
+    ['explore', 'Verkennen'],
+    ['design', 'Ontwerpen'],
+    ['build', 'Bouwen / herstellen'],
+    ['verify', 'Controleren'],
+    ['deliver', 'Opleveren'],
+  ];
+  const MISSION_STATUSES = {
+    running: 'Bezig', paused: 'Gepauzeerd', completed: 'Afgerond',
+    failed: 'Mislukt', interrupted: 'Onderbroken',
+  };
+  const AGENT_STATUSES = {
+    queued: 'Wacht', running: 'Bezig', success: 'Afgerond',
+    partial: 'Deels afgerond', failed: 'Mislukt', interrupted: 'Onderbroken',
+  };
+  const TEST_STATUSES = {
+    pending: 'Tests gepland', running: 'Tests worden uitgevoerd', passed: 'Tests geslaagd',
+    failed: 'Tests niet geslaagd', skipped: 'Tests overgeslagen',
+    not_requested: 'Geen aparte testopdracht', interrupted: 'Tests onderbroken',
+    incomplete: 'Tests nog niet volledig uitgevoerd',
+  };
+  let currentMission = null;
+  let missionBusy = false;
+  let missionAgentLimit = 32;
+  let configuredAgentLimit = 32;
+
+  function textElement(tag, className, value) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (value !== undefined) el.textContent = String(value);
+    return el;
+  }
+
+  function boundedAgentLimit(value) {
+    const count = Number(value);
+    return Number.isFinite(count) ? Math.max(1, Math.min(32, Math.floor(count))) : 32;
+  }
+
+  function phaseLabel(phase) {
+    const item = MISSION_PHASES.find(([id]) => id === phase);
+    return item ? item[1] : String(phase || '');
+  }
+
+  const missionFooter = textElement('section', 'mission-footer');
+  missionFooter.id = 'mission-footer';
+  missionFooter.hidden = true;
+  missionFooter.setAttribute('aria-label', 'Voortgang van de opdracht');
+  const missionProgress = textElement('div', 'mission-progress');
+  missionProgress.hidden = true;
+  const missionHeading = textElement('div', 'mission-heading');
+  const missionStatus = textElement('span', 'mission-status');
+  const missionCount = textElement('span', 'mission-count');
+  const missionResume = textElement('button', 'mission-resume', 'Hervatten');
+  missionResume.type = 'button';
+  missionResume.hidden = true;
+  missionResume.addEventListener('click', () => {
+    if (!currentMission || !['paused', 'failed', 'interrupted'].includes(currentMission.status)) return;
+    missionResume.disabled = true;
+    vscode.postMessage({ type: 'resumeMission' });
+  });
+  missionHeading.append(missionStatus, missionCount, missionResume);
+  const missionPhases = textElement('ol', 'mission-phases');
+  missionPhases.setAttribute('aria-label', 'Fasen');
+  const missionPhaseNodes = MISSION_PHASES.map(([phase, label]) => {
+    const el = textElement('li', 'mission-phase', label);
+    el.dataset.phase = phase;
+    missionPhases.appendChild(el);
+    return el;
+  });
+  const missionActivity = textElement('div', 'mission-activity');
+  missionActivity.setAttribute('role', 'status');
+  missionActivity.setAttribute('aria-live', 'polite');
+  missionActivity.setAttribute('aria-atomic', 'true');
+  const missionReturn = textElement('div', 'mission-return');
+  const missionTests = textElement('div', 'mission-tests');
+  const missionDetails = textElement('details', 'mission-details');
+  const missionSummary = textElement('summary', '', 'Agents en geschiedenis');
+  const missionDetailBody = textElement('div', 'mission-detail-body');
+  const missionAgentsTitle = textElement('h4', '', 'Agents');
+  const missionAgents = textElement('ul', 'mission-agents');
+  const missionHistoryTitle = textElement('h4', '', 'Faseovergangen');
+  const missionHistory = textElement('ol', 'mission-history');
+  missionDetailBody.append(missionAgentsTitle, missionAgents, missionHistoryTitle, missionHistory);
+  missionDetails.append(missionSummary, missionDetailBody);
+  missionProgress.append(missionHeading, missionPhases, missionActivity, missionReturn, missionTests, missionDetails);
+  const selfUpdateStatus = textElement('div', 'mission-self-update');
+  selfUpdateStatus.hidden = true;
+  selfUpdateStatus.setAttribute('role', 'status');
+  missionFooter.append(missionProgress, selfUpdateStatus);
+  const inputArea = document.getElementById('input-area');
+  inputArea.before(missionFooter);
+
+  function updateExecutionControls() {
+    const busy = isStreaming || missionBusy;
+    sendBtn.style.display = busy ? 'none' : 'inline-block';
+    stopBtn.style.display = busy ? 'inline-block' : 'none';
+    missionResume.disabled = busy;
+  }
+
+  function renderMission(mission, maxParallelAgents) {
+    currentMission = mission || null;
+    missionBusy = currentMission?.status === 'running';
+    updateExecutionControls();
+    // A setting change applies to the next pool. Only mission messages can
+    // change the displayed limit of an already running pool.
+    if (missionBusy && maxParallelAgents !== undefined) {
+      missionAgentLimit = boundedAgentLimit(maxParallelAgents);
+    } else if (!missionBusy) {
+      missionAgentLimit = configuredAgentLimit;
+    }
+    missionProgress.hidden = !currentMission;
+    missionFooter.hidden = !currentMission && selfUpdateStatus.hidden;
+    if (!currentMission) return;
+
+    const status = MISSION_STATUSES[mission.status] || String(mission.status || '');
+    const agents = Array.isArray(mission.agents) ? mission.agents : [];
+    const transitions = Array.isArray(mission.transitions) ? mission.transitions : [];
+    const running = agents.filter(agent => agent.status === 'running').length;
+    const queued = agents.filter(agent => agent.status === 'queued').length;
+    const succeeded = agents.filter(agent => agent.status === 'success').length;
+    missionStatus.textContent = status;
+    missionFooter.dataset.status = mission.status;
+    missionCount.textContent = `${running} / ${missionAgentLimit} agents actief`;
+    missionCount.title = `${queued} in wachtrij · ${succeeded} afgerond · ${agents.length} totaal`;
+    missionResume.hidden = !['paused', 'failed', 'interrupted'].includes(mission.status);
+    const visited = new Set(transitions.flatMap(transition => [transition.from, transition.to]));
+    missionPhaseNodes.forEach(el => {
+      const active = el.dataset.phase === mission.phase;
+      el.classList.toggle('active', active);
+      el.classList.toggle('visited', !active && visited.has(el.dataset.phase));
+      if (active) el.setAttribute('aria-current', 'step');
+      else el.removeAttribute('aria-current');
+    });
+    missionActivity.textContent = `${phaseLabel(mission.phase)} — ${mission.activity || status}`;
+    const latest = transitions[transitions.length - 1];
+    missionReturn.hidden = !latest || !latest.backward;
+    missionReturn.textContent = latest && latest.backward
+      ? `↶ ${phaseLabel(latest.from)} → ${phaseLabel(latest.to)}: ${latest.reason || 'Aanpak herzien'}` : '';
+    missionTests.hidden = !mission.testStatus;
+    missionTests.textContent = TEST_STATUSES[mission.testStatus] || String(mission.testStatus || '');
+    missionSummary.textContent = `Agents (${agents.length}) en geschiedenis (${transitions.length})`;
+
+    missionAgents.replaceChildren();
+    if (!agents.length) missionAgents.appendChild(textElement('li', 'mission-empty', 'Nog geen subagents gestart.'));
+    for (const agent of agents) {
+      const row = textElement('li', 'mission-agent');
+      row.dataset.status = agent.status;
+      const task = textElement('span', 'mission-agent-task', agent.task || agent.id);
+      task.title = String(agent.id || '');
+      const state = textElement('span', 'mission-agent-state', AGENT_STATUSES[agent.status] || agent.status);
+      row.append(task, state);
+      if (agent.activity) row.appendChild(textElement('span', 'mission-agent-activity', agent.activity));
+      missionAgents.appendChild(row);
+    }
+    missionHistory.replaceChildren();
+    if (!transitions.length) missionHistory.appendChild(textElement('li', 'mission-empty', 'Nog geen faseovergangen.'));
+    // Most recent first, preserving the underlying order and the open details state.
+    for (const transition of [...transitions].reverse()) {
+      const row = textElement('li', transition.backward ? 'mission-history-backward' : '');
+      row.appendChild(textElement('span', 'mission-history-route',
+        `${transition.backward ? '↶ ' : ''}${phaseLabel(transition.from)} → ${phaseLabel(transition.to)}`));
+      if (transition.reason) row.appendChild(textElement('span', 'mission-history-reason', transition.reason));
+      const date = new Date(transition.at);
+      if (Number.isFinite(date.getTime())) {
+        const time = textElement('time', '', date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        time.dateTime = date.toISOString();
+        time.title = date.toLocaleString();
+        row.appendChild(time);
+      }
+      missionHistory.appendChild(row);
+    }
+  }
+
+  function renderSelfUpdate(message) {
+    selfUpdateStatus.hidden = !message.status || message.status === 'idle';
+    selfUpdateStatus.textContent = selfUpdateStatus.hidden ? ''
+      : `Zelfupdate: ${message.detail || message.status}`;
+    selfUpdateStatus.dataset.status = message.status || '';
+    missionFooter.hidden = !currentMission && selfUpdateStatus.hidden;
+  }
+
+  const autonomyOptions = textElement('div', 'autonomy-options');
+  autonomyOptions.setAttribute('role', 'group');
+  autonomyOptions.setAttribute('aria-label', 'Opties voor de volgende opdracht');
+  function createMissionOption(id, text, key) {
+    const label = textElement('label', 'autonomy-option');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.id = id;
+    label.append(input, textElement('span', '', text));
+    label.title = 'Instelling voor de volgende opdracht; wordt onthouden.';
+    autonomyOptions.appendChild(label);
+    input.addEventListener('change', () => {
+      lastConfig[key] = input.checked;
+      syncMissionOptions();
+      vscode.postMessage({ type: 'saveConfig', config: { [key]: input.checked } });
+    });
+    return input;
+  }
+  const autonomousModeInput = createMissionOption('mission-autonomous', 'Autonoom uitvoeren', 'autonomousMode');
+  const autoTestInput = createMissionOption('mission-auto-test', 'Tests schrijven en uitvoeren', 'autoTest');
+  inputArea.prepend(autonomyOptions);
+
+  function syncMissionOptions() {
+    autonomousModeInput.checked = lastConfig.autonomousMode === true;
+    autoTestInput.checked = autonomousModeInput.checked || lastConfig.autoTest === true;
+    autoTestInput.disabled = autonomousModeInput.checked;
+    autoTestInput.title = autonomousModeInput.checked
+      ? 'Tests zijn standaard inbegrepen bij autonoom uitvoeren.' : 'Een aparte testopdracht na de implementatie.';
+  }
+
   // ── Markdown rendering ──────────────────────────────
 
   function escapeHtml(str) {
@@ -465,10 +678,9 @@
 
   function startStreaming() {
     isStreaming = true;
+    updateExecutionControls();
     currentContent = '';
     thinkContent = '';
-    sendBtn.style.display = 'none';
-    stopBtn.style.display = 'inline-block';
     // The bubble is created lazily on the first token, so tool-only steps
     // (which stream no text) don't leave an empty bubble behind.
     currentBubble = null;
@@ -704,9 +916,8 @@
 
   function finishStreaming(overrideContent) {
     isStreaming = false;
+    updateExecutionControls();
     clearToolProgress();
-    sendBtn.style.display = 'inline-block';
-    stopBtn.style.display = 'none';
 
     if (currentBubble) {
       const body = currentBubble.querySelector('.body');
@@ -1167,7 +1378,32 @@
 
   // ── Config panel ────────────────────────────────────
 
-  let lastConfig = { endpoint: '', model: '', hasToken: false, trustedCommands: [], confirmCommands: true };
+  let lastConfig = {
+    endpoint: '', model: '', hasToken: false, trustedCommands: [], confirmCommands: true,
+    autonomousMode: false, autoTest: false, maxParallelAgents: 32,
+  };
+
+  const agentsConfigTab = textElement('button', 'config-tab', 'Agents');
+  agentsConfigTab.type = 'button';
+  agentsConfigTab.dataset.tab = 'agents';
+  document.querySelector('.config-tabs').appendChild(agentsConfigTab);
+  const agentsConfigPane = textElement('div', 'config-pane hidden');
+  agentsConfigPane.dataset.pane = 'agents';
+  const agentLimitField = textElement('label', 'config-field');
+  const agentLimitInput = document.createElement('input');
+  let agentLimitDirty = false;
+  agentLimitInput.id = 'cfg-max-parallel-agents';
+  agentLimitInput.type = 'number';
+  agentLimitInput.min = '1';
+  agentLimitInput.max = '32';
+  agentLimitInput.step = '1';
+  agentLimitInput.required = true;
+  agentLimitInput.value = '32';
+  agentLimitInput.addEventListener('input', () => { agentLimitDirty = true; });
+  agentLimitField.append(textElement('span', '', 'Maximaal gelijktijdige subagents'), agentLimitInput);
+  agentsConfigPane.append(agentLimitField,
+    textElement('div', 'config-hint', '1–32 agents. De hoofdagent kiest hoeveel agents nodig zijn. Wachtende taken tellen niet als actief; alle subagents delen deze limiet.'));
+  document.querySelector('.config-actions').before(agentsConfigPane);
 
   function selectConfigTab(name) {
     document.querySelectorAll('.config-tab').forEach(t =>
@@ -1179,6 +1415,56 @@
   document.querySelectorAll('.config-tab').forEach(tab => {
     tab.addEventListener('click', () => selectConfigTab(tab.dataset.tab));
   });
+
+  // ── Memory pane ────────────────────────────────────
+  // The pane's markup is static; its tab is added here so it follows the
+  // dynamically appended Agents tab instead of sitting in front of it.
+  const memoryConfigTab = textElement('button', 'config-tab', 'Memory');
+  memoryConfigTab.type = 'button';
+  memoryConfigTab.dataset.tab = 'memory';
+  memoryConfigTab.addEventListener('click', () => selectConfigTab('memory'));
+  document.querySelector('.config-tabs').appendChild(memoryConfigTab);
+
+  // The confirmation lives on the extension side (a real modal), so these
+  // buttons only ask; they never assume the erase happened.
+  const memoryStatusEl = document.getElementById('cfg-memory-status');
+  const memoryButtons = [
+    ['cfg-clear-project', 'project'],
+    ['cfg-clear-global', 'global'],
+    ['cfg-clear-all', 'all'],
+  ].map(([id, scope]) => {
+    const button = document.getElementById(id);
+    button.addEventListener('click', () => {
+      vscode.postMessage({ type: 'clearMemory', scope });
+    });
+    return { button, scope };
+  });
+
+  const reflectButton = document.getElementById('cfg-reflect');
+  reflectButton.addEventListener('click', () => {
+    vscode.postMessage({ type: 'reflectMemory' });
+  });
+
+  function applyMemoryState(state) {
+    reflectButton.disabled = !state || state.available === false || !state.projectAvailable;
+    if (!state || state.available === false) {
+      memoryStatusEl.textContent = state && state.error
+        ? 'Memory unavailable: ' + state.error
+        : 'Memory storage is unavailable in this window.';
+      memoryButtons.forEach(({ button }) => { button.disabled = true; });
+      return;
+    }
+    const counts = [
+      state.projectSkills + ' project skill(s)',
+      state.globalSkills + ' agent skill(s)',
+      state.episodes + ' recorded experiment(s)',
+    ];
+    memoryStatusEl.textContent = 'Stored now: ' + counts.join(' · ') +
+      (state.projectAvailable ? '' : ' — no project storage in this window.');
+    memoryButtons.forEach(({ button, scope }) => {
+      button.disabled = scope !== 'global' && !state.projectAvailable;
+    });
+  }
 
   const PROVIDER_META = {
     local: {
@@ -1247,6 +1533,8 @@
       lastConfig.hasToken ? 'A token is stored. Leave blank to keep it, or type a new one.' : '';
     document.getElementById('cfg-trusted').value = (lastConfig.trustedCommands || []).join('\n');
     document.getElementById('cfg-confirm-commands').checked = lastConfig.confirmCommands !== false;
+    agentLimitInput.value = String(boundedAgentLimit(lastConfig.maxParallelAgents));
+    agentLimitDirty = false;
     updateProviderHint();
     updateModelPlaceholder();
     selectConfigTab('connection');
@@ -1265,6 +1553,11 @@
   });
 
   document.getElementById('cfg-save').addEventListener('click', () => {
+    if (!agentLimitInput.checkValidity()) {
+      selectConfigTab('agents');
+      agentLimitInput.reportValidity();
+      return;
+    }
     const provider = document.getElementById('cfg-provider').value;
     const endpoint = document.getElementById('cfg-endpoint').value.trim();
     const model = document.getElementById('cfg-model').value.trim();
@@ -1272,7 +1565,12 @@
     const trustedCommands = document.getElementById('cfg-trusted').value
       .split('\n').map(s => s.trim()).filter(Boolean);
     const confirmCommands = document.getElementById('cfg-confirm-commands').checked;
-    const cfg = { provider, endpoint, model, trustedCommands, confirmCommands };
+    const cfg = {
+      provider, endpoint, model, trustedCommands, confirmCommands,
+      autonomousMode: autonomousModeInput.checked,
+      autoTest: lastConfig.autoTest === true,
+      maxParallelAgents: Number(agentLimitInput.value),
+    };
     // Only send the token when the user typed something, so an empty field
     // keeps the previously stored token instead of wiping it.
     if (tokenField !== '') cfg.token = tokenField;
@@ -1281,7 +1579,13 @@
   });
 
   function applyConfigState(cfg) {
-    lastConfig = cfg;
+    lastConfig = { ...lastConfig, ...cfg };
+    syncMissionOptions();
+    configuredAgentLimit = boundedAgentLimit(lastConfig.maxParallelAgents);
+    if (configOverlay.classList.contains('hidden') || !agentLimitDirty) {
+      agentLimitInput.value = String(configuredAgentLimit);
+    }
+    renderMission(currentMission);
     if (endpointLabel) {
       const ctx = cfg.contextSize ? ` · ${Math.round(cfg.contextSize / 1024)}k ctx` : '';
       endpointLabel.textContent = cfg.endpoint ? shortenEndpoint(cfg.endpoint) + ctx : '';
@@ -1390,12 +1694,24 @@
         applyConfigState(msg.config);
         break;
 
+      case 'mission':
+        renderMission(msg.mission, msg.maxParallelAgents);
+        break;
+
+      case 'selfUpdate':
+        renderSelfUpdate(msg);
+        break;
+
       case 'configSaved':
-        addStatusMessage('Connection settings saved', 'success');
+        addStatusMessage('Settings saved', 'success');
         break;
 
       case 'notice':
         addStatusMessage(msg.text, msg.level || 'info');
+        break;
+
+      case 'memoryState':
+        applyMemoryState(msg.state);
         break;
 
       case 'restoreTranscript':

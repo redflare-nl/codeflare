@@ -50,10 +50,12 @@ function effectiveMaxTokens(messages: ChatMessage[], configuredMax: number): num
 // Anthropic's Messages API version pin. Stable value from the docs.
 const ANTHROPIC_VERSION = '2023-06-01';
 
-function buildHeaders(): Record<string, string> {
+function buildHeaders(config: Pick<CodeFlareConfig, 'provider'>): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const { provider } = getConfig();
-  const key = getApiKey();
+  const { provider } = config;
+  // The key is looked up for the provider actually being called — a judge on a
+  // different provider than the worker needs its own credential.
+  const key = getApiKey(provider);
   if (provider === 'anthropic') {
     // Native Anthropic auth: x-api-key + a version pin (NOT Bearer).
     headers['anthropic-version'] = ANTHROPIC_VERSION;
@@ -238,16 +240,36 @@ function mapAnthropicStop(sr: string | null | undefined): string {
   }
 }
 
+import type { ClientTarget } from './judge';
+
 export class VLLMClient {
   private abortController: AbortController | null = null;
 
+  /**
+   * Without a target the client follows the live settings exactly as before.
+   * With one it is pinned to another provider/endpoint/model — the independent
+   * judge — while everything else (timeouts, prompt bounding) stays shared.
+   */
+  constructor(private readonly target?: ClientTarget) {}
+
+  private config(): CodeFlareConfig {
+    const config = this.config();
+    return this.target ? { ...config, ...this.target } : config;
+  }
+
+  /** "provider:model" of what this client actually calls (for labels and logs). */
+  describe(): string {
+    const { provider, model } = this.config();
+    return `${provider}:${model}`;
+  }
+
   async checkHealth(): Promise<boolean> {
-    const config = getConfig();
+    const config = this.config();
     try {
       // /v1/models works for both VLLM and OpenAI-compatible endpoints
       // and respects the auth token, unlike VLLM's /health.
       const resp = await fetch(`${config.endpoint}/v1/models`, {
-        headers: buildHeaders(),
+        headers: buildHeaders(config),
         signal: AbortSignal.timeout(5000),
       });
       return resp.ok;
@@ -258,14 +280,14 @@ export class VLLMClient {
 
   /** One-shot, non-streaming completion (used for context compaction). */
   async complete(messages: ChatMessage[], maxTokens = 1200): Promise<string> {
-    const config = getConfig();
+    const config = this.config();
     messages = boundPrompt(messages);
     if (config.provider === 'anthropic') {
       return this.completeAnthropic(messages, maxTokens, config);
     }
     const resp = await fetch(`${config.endpoint}/v1/chat/completions`, {
       method: 'POST',
-      headers: buildHeaders(),
+      headers: buildHeaders(config),
       body: JSON.stringify({
         model: config.model,
         messages,
@@ -305,7 +327,7 @@ export class VLLMClient {
     tools?: ToolDefinition[],
     ctxRetry = false
   ): Promise<StreamResult> {
-    const config = getConfig();
+    const config = this.config();
     if (config.provider === 'anthropic') {
       return this.streamChatAnthropic(messages, callbacks, tools, config);
     }
@@ -359,7 +381,7 @@ export class VLLMClient {
     try {
       response = await fetch(`${config.endpoint}/v1/chat/completions`, {
         method: 'POST',
-        headers: buildHeaders(),
+        headers: buildHeaders(config),
         body: JSON.stringify({
           model: config.model,
           messages,
@@ -633,7 +655,7 @@ export class VLLMClient {
     if (system) { body.system = system; }
     const resp = await fetch(`${config.endpoint}/v1/messages`, {
       method: 'POST',
-      headers: buildHeaders(),
+      headers: buildHeaders(config),
       body: JSON.stringify(body),
       // Scale the deadline to prompt size (compaction prompts are the largest we
       // send), matching complete()'s non-Anthropic path.
@@ -712,7 +734,7 @@ export class VLLMClient {
     try {
       response = await fetch(`${config.endpoint}/v1/messages`, {
         method: 'POST',
-        headers: buildHeaders(),
+        headers: buildHeaders(config),
         body: JSON.stringify(body),
         signal: this.abortController.signal,
       });

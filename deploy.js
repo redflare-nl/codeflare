@@ -1,23 +1,16 @@
-// Runs automatically after `npm run package` (postpackage hook):
-// removes older packaged .vsix files and installs the freshly built one into
-// VSCode, so you only need to reload the window to pick up the new version.
-const { execSync } = require('child_process');
+// Explicit deployment: `npm run deploy`. Packaging alone never installs.
+// Older packages are retained so a known-good VSIX can be selected for rollback.
 const fs = require('fs');
+const path = require('path');
 const pkg = require('./package.json');
+const { resolveCodeCommand, installVsix } = require('./scripts/self-update-recovery.cjs');
 
-const vsix = `codeflare-${pkg.version}.vsix`;
-
-// Remove any older codeflare-*.vsix so only the current build remains.
-for (const f of fs.readdirSync('.')) {
-  if (/^codeflare-.*\.vsix$/.test(f) && f !== vsix) {
-    try { fs.unlinkSync(f); console.log('removed old package:', f); } catch { /* ignore */ }
-  }
-}
-
-// Install the new build. --force replaces the previously installed version.
+const vsix = path.resolve(process.argv[2] || `codeflare-${pkg.version}.vsix`);
 try {
-  execSync(`code --install-extension ${vsix} --force`, { stdio: 'inherit' });
-  console.log(`\nInstalled ${vsix}. Reload the VSCode window (Developer: Reload Window) to activate it.`);
+  if (!fs.statSync(vsix).isFile()) { throw new Error(`VSIX is not a file: ${vsix}`); }
+  installVsix(resolveCodeCommand(process.env.CODEFLARE_VSCODE_CLI || 'code'), vsix);
+  console.log(`Installed ${vsix}. Reload the VS Code window to activate it. Older VSIX packages were preserved.`);
 } catch (err) {
-  console.warn(`\nCould not auto-install ${vsix} (is the 'code' CLI on PATH?). Install it manually if needed.`);
+  console.error(`Could not install ${vsix}: ${err.message}`);
+  process.exitCode = 1;
 }

@@ -19,6 +19,7 @@ import { addProbe, listProbes, readProbes, removeProbes } from '../editor/probes
 import { findRelated, invalidateRepoMap } from '../editor/repoMap';
 import { recordPreMutation } from '../editor/checkpoint';
 import { canPrompt, gateCommand, gateMutation, previewMutation } from '../engine/policyGate';
+import { MISSION_TOOLS } from '../engine/missionTools';
 import { policyMessage } from '../engine/policy';
 import { labBenchmarkTool, labDiffTestTool, labProfileTool, labRunTool, labScalingTool } from '../engine/lab';
 import { getStacks, stacksToolReport, invalidateStacks } from '../stacks/stacks';
@@ -223,7 +224,7 @@ const READ_TOOLS: ToolDefinition[] = [
       name: 'remember',
       description:
         'Save a DURABLE, PROVEN fact about this project to the persistent project ' +
-        'memory (kept across conversations and shown to you next time). Use it ONLY for ' +
+        'memory in private workspace storage outside the repository (kept across conversations, never shared globally). Use it ONLY for ' +
         'lasting, high-confidence knowledge you had to discover: how the project is built ' +
         'or tested (exact command), its engine/framework/language version, a key ' +
         'architectural decision, or an explicit project rule. Do NOT save guesses, ' +
@@ -555,8 +556,8 @@ const SUBAGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: 'run_subagent',
       description:
-        'Delegate ONE self-contained sub-task to a fresh agent that has the same file/search/' +
-        'command tools and its own scratch context. It runs to completion and returns a STRUCTURED ' +
+        'Delegate ONE self-contained sub-task to a fresh agent with coordinated file tools, search, ' +
+        'web research, and its own scratch context. Run shell commands and tests yourself after integration. It returns a STRUCTURED ' +
         'result (status success/partial/failed, summary, changed files, tests, open issues). Use ' +
         'for a large, separable chunk of work to keep your own context focused.',
       parameters: {
@@ -571,18 +572,19 @@ const SUBAGENT_TOOLS: ToolDefinition[] = [
     function: {
       name: 'run_subagents',
       description:
-        'Delegate SEVERAL INDEPENDENT sub-tasks to run in PARALLEL (max 4), each in its own fresh ' +
+        'Delegate SEVERAL INDEPENDENT sub-tasks to a shared pool (settings cap 1–32 active), each in its own fresh ' +
         'agent. Returns a structured result per task (status, summary, changed files, tests, open ' +
         'issues). Use only for tasks that do NOT depend on each other and do NOT touch the same ' +
         'files — parallel edits to one file will conflict. For dependent steps, use run_subagent ' +
-        'sequentially instead.',
+        'sequentially instead. Workers have coordinated file tools and web research. Run shell commands and tests yourself after integration. Excess tasks wait in the queue.',
       parameters: {
         type: 'object',
         properties: {
           tasks: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Independent, self-contained task descriptions (up to 4).',
+            maxItems: 128,
+            description: 'Independent, self-contained task descriptions (up to 128 queued; settings cap simultaneous agents).',
           },
         },
         required: ['tasks'],
@@ -1671,6 +1673,7 @@ function groupEnabled(group: ToolGroup, opts: ToolOptions): boolean {
 export function getToolDefinitions(opts: ToolOptions): ToolDefinition[] {
   return [
     ...REGISTRY.filter(s => groupEnabled(s.group, opts)).map(s => s.def),
+    ...(opts.plan !== false ? MISSION_TOOLS : []),
     ...getMcpToolDefinitions(),
   ];
 }

@@ -12,6 +12,8 @@ vitest.config.*
 # Dev & local config
 .claude/**
 .codeflare-trash/**
+.codeflare/**
+scripts/**
 .vscode/**
 .gitignore
 .git/**

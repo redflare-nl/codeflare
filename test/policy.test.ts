@@ -3,8 +3,11 @@ import {
   BUDGET_PROFILES,
   DEFAULT_FORBIDDEN_PATHS,
   DEFAULT_PROTECTED_PATHS,
+  GUARDRAIL_PATHS,
   checkCommand,
+  checkGuardrailCommand,
   checkPath,
+  isGuardrailPath,
   matchGlob,
 } from '../src/engine/policy';
 import {
@@ -22,6 +25,71 @@ const PATHS = {
   protectedPaths: DEFAULT_PROTECTED_PATHS,
   forbiddenPaths: DEFAULT_FORBIDDEN_PATHS,
 };
+
+describe('guardrails (pure)', () => {
+  it('names the files that constitute the safety boundary, and nothing outside src/engine + scripts', () => {
+    expect(GUARDRAIL_PATHS).toContain('src/engine/policy.ts');
+    expect(GUARDRAIL_PATHS).toContain('src/engine/policyGate.ts');
+    expect(GUARDRAIL_PATHS).toContain('src/engine/selfUpdate.ts');
+    expect(GUARDRAIL_PATHS).toContain('scripts/self-update-recovery.cjs');
+    for (const p of GUARDRAIL_PATHS) { expect(p).toMatch(/^(src\/engine\/|scripts\/)/); }
+    // The normal improvement surface is deliberately NOT locked.
+    expect(GUARDRAIL_PATHS).not.toContain('src/llm/tools.ts');
+    expect(GUARDRAIL_PATHS).not.toContain('src/utils/config.ts');
+  });
+
+  it('isGuardrailPath tolerates spelling variants and rejects near-misses', () => {
+    expect(isGuardrailPath('src/engine/policy.ts')).toBe(true);
+    expect(isGuardrailPath('src\\engine\\policy.ts')).toBe(true);
+    expect(isGuardrailPath('./src/engine/POLICY.TS')).toBe(true);
+    expect(isGuardrailPath('test/policy.test.ts')).toBe(false);
+    expect(isGuardrailPath('src/engine/policyGate.test.ts')).toBe(false);
+    expect(isGuardrailPath('')).toBe(false);
+  });
+
+  it('guardrail files appended as forbidden are blocked in every profile, as protected only autonomously', () => {
+    const forbid = { ...PATHS, forbiddenPaths: [...PATHS.forbiddenPaths, ...GUARDRAIL_PATHS] };
+    const protect = { ...PATHS, protectedPaths: [...PATHS.protectedPaths, ...GUARDRAIL_PATHS] };
+    for (const profile of ['interactive', 'conservative-autonomous', 'autonomous'] as const) {
+      expect(checkPath('src/engine/policy.ts', forbid, profile).code).toBe('PATH_FORBIDDEN');
+    }
+    expect(checkPath('src/engine/policy.ts', protect, 'autonomous').code).toBe('PATH_PROTECTED');
+    expect(checkPath('src/engine/policy.ts', protect, 'interactive').allowed).toBe(true);
+  });
+
+  describe('checkGuardrailCommand', () => {
+    it('refuses writes, allows reads, and judges every segment of a chain', () => {
+      expect(checkGuardrailCommand('echo x > src/engine/policy.ts').allowed).toBe(false);
+      expect(checkGuardrailCommand('cat src/engine/policy.ts').allowed).toBe(true);
+      expect(checkGuardrailCommand('cat src/engine/policy.ts; echo y >> src/engine/policy.ts').allowed).toBe(false);
+      expect(checkGuardrailCommand('grep -n export src/engine/policy.ts | head -5').allowed).toBe(true);
+    });
+
+    it('matches by basename too, so a cd or relative spelling cannot dodge it', () => {
+      expect(checkGuardrailCommand('cd src/engine && echo x > policy.ts').allowed).toBe(false);
+      expect(checkGuardrailCommand('cd src/engine && cat policy.ts').allowed).toBe(true);
+    });
+
+    it('treats output redirection as a write even after a read-only leader', () => {
+      expect(checkGuardrailCommand('cat other.ts > src/engine/evidence.ts').allowed).toBe(false);
+      // Input redirection is not a write.
+      expect(checkGuardrailCommand('grep export < src/engine/evidence.ts').allowed).toBe(true);
+    });
+
+    it('blocks HEAD-moving git regardless of the paths mentioned', () => {
+      expect(checkGuardrailCommand('git commit -am "loosen budgets"').code).toBe('COMMAND_BLOCKED');
+      expect(checkGuardrailCommand('git add src/llm/prompts.ts').code).toBe('COMMAND_BLOCKED');
+      expect(checkGuardrailCommand('git diff').allowed).toBe(true);
+      expect(checkGuardrailCommand('git show HEAD:src/engine/policy.ts').allowed).toBe(true);
+    });
+
+    it('leaves commands that do not involve guardrails alone', () => {
+      expect(checkGuardrailCommand('').allowed).toBe(true);
+      expect(checkGuardrailCommand('npm run build').allowed).toBe(true);
+      expect(checkGuardrailCommand('echo done > out/log.txt').allowed).toBe(true);
+    });
+  });
+});
 
 describe('matchGlob', () => {
   it('matches ** across directories and * within a segment', () => {

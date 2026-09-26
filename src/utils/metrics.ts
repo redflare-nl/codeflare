@@ -13,6 +13,12 @@ export interface TurnMetrics {
   startedAt: number;
   model: string;
   provider: string;
+  // Set only when an INDEPENDENT judge reviewed this turn ("provider:model").
+  // Absent = the worker reviewed itself, which the report must not dress up.
+  judgeModel?: string;
+  // True when this model's measured over-claim record made a behavioural check
+  // mandatory for the turn (see engine/calibration.ts).
+  calibrationApplied?: boolean;
   rounds: number;              // _streamResponse invocations (fix-rounds included)
   steps: number;               // model calls across all rounds
   toolCalls: number;
@@ -107,6 +113,26 @@ export function isUserDecline(output: string): boolean {
 // the second write would clobber the first turn's appended line. Chaining each
 // write after the previous one guarantees they append in order.
 let metricsWriteChain: Promise<void> = Promise.resolve();
+
+/**
+ * The last `limit` recorded turns (oldest first), for calibration. Malformed
+ * lines are skipped; a missing file is an empty history. Never throws.
+ */
+export async function readTurnMetrics(limit = 200): Promise<Array<Partial<TurnMetrics> & { ts?: string; durationMs?: number }>> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!root) { return []; }
+  try {
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, '.codeflare', 'metrics.jsonl'));
+    const lines = new TextDecoder().decode(bytes).split('\n').filter(Boolean);
+    const out: Array<Partial<TurnMetrics> & { ts?: string; durationMs?: number }> = [];
+    for (const line of lines.slice(-limit)) {
+      try { const rec = JSON.parse(line); if (rec && typeof rec === 'object') { out.push(rec); } } catch { /* skip */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 /** Append one turn's metrics to .codeflare/metrics.jsonl. Never throws. */
 export async function flushTurnMetrics(m: TurnMetrics): Promise<void> {

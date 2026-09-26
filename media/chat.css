@@ -611,9 +611,140 @@ body {
 /* ── Input area ────────────────────────────────────── */
 
 #input-area {
+  flex-shrink: 0;
   padding: 8px;
   border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
   background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+
+/* Mission state is a fixed sibling of the scrollable transcript. */
+#messages { min-height: 0; }
+.mission-footer {
+  flex-shrink: 0;
+  padding: 8px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.15));
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  font-size: 11px;
+  line-height: 1.4;
+}
+.mission-footer [hidden], .mission-footer[hidden] { display: none !important; }
+.mission-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-bottom: 6px;
+}
+.mission-status { font-weight: 600; }
+.mission-count {
+  color: var(--vscode-descriptionForeground);
+  margin-left: auto;
+}
+.mission-resume {
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 7px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+.mission-resume:hover { background: var(--vscode-button-hoverBackground); }
+.mission-resume:disabled { cursor: default; opacity: 0.6; }
+.mission-resume:focus-visible, .mission-details summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+.mission-phases {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.35fr 1fr 1fr;
+  gap: 3px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 6px;
+}
+.mission-phase {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 30px;
+  padding: 3px 2px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.15));
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: anywhere;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+.mission-phase.visited { border-bottom-color: var(--vscode-descriptionForeground); }
+.mission-phase.active {
+  border-color: var(--vscode-focusBorder);
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-button-background));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-button-foreground));
+  font-weight: 600;
+}
+.mission-footer[data-status="failed"] .mission-status,
+.mission-agent[data-status="failed"] .mission-agent-state {
+  color: var(--vscode-errorForeground);
+}
+.mission-footer[data-status="completed"] .mission-status,
+.mission-agent[data-status="success"] .mission-agent-state {
+  color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
+}
+.mission-activity { overflow-wrap: anywhere; }
+.mission-return {
+  margin-top: 5px;
+  padding-left: 6px;
+  border-left: 2px solid var(--vscode-editorWarning-foreground, var(--vscode-focusBorder));
+  overflow-wrap: anywhere;
+}
+.mission-tests { margin-top: 3px; color: var(--vscode-descriptionForeground); }
+.mission-details { margin-top: 5px; }
+.mission-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+}
+.mission-detail-body {
+  max-height: min(26vh, 220px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.mission-detail-body h4 { font-size: 11px; margin: 8px 0 3px; }
+.mission-agents, .mission-history { list-style: none; padding: 0; margin: 0; }
+.mission-agents > li, .mission-history > li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+}
+.mission-agent { display: flex; flex-wrap: wrap; gap: 2px 6px; }
+.mission-agent-task { flex: 1; min-width: 100px; overflow-wrap: anywhere; }
+.mission-agent-state { color: var(--vscode-descriptionForeground); }
+.mission-agent-activity {
+  flex-basis: 100%;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+.mission-history-route { font-weight: 600; overflow-wrap: anywhere; }
+.mission-history-reason { display: block; overflow-wrap: anywhere; }
+.mission-history time, .mission-empty { color: var(--vscode-descriptionForeground); }
+.mission-history-backward .mission-history-route {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
+}
+.mission-self-update { padding: 5px 0; overflow-wrap: anywhere; }
+.autonomy-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin-bottom: 7px;
+  font-size: 11px;
+}
+.autonomy-option { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.autonomy-option input { accent-color: var(--vscode-focusBorder); }
+@media (prefers-reduced-motion: reduce) {
+  .mission-phase { transition: none; }
 }
 
 .input-row {
@@ -1009,6 +1140,41 @@ body {
 }
 .config-actions button:hover {
   opacity: 0.9;
+}
+
+/* Destructive actions inside a pane (e.g. erasing memory). Uses the theme's own
+   error colour so it reads as dangerous in both light and dark themes. */
+.config-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.config-buttons button {
+  border: 1px solid var(--vscode-errorForeground, #f14c4c);
+  border-radius: 3px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+.config-buttons button:hover:not(:disabled) {
+  background: var(--vscode-errorForeground, #f14c4c);
+  color: var(--vscode-editor-background);
+}
+.config-buttons button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* Non-destructive actions in the same layout (e.g. reflection). */
+.config-buttons.neutral button {
+  border-color: var(--vscode-button-secondaryBackground);
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+.config-buttons.neutral button:hover:not(:disabled) {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
 }
 
 /* ── Image attachments ─────────────────────────────── */

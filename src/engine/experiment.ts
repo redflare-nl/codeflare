@@ -11,7 +11,7 @@
  * Pure module (no vscode imports) so it is unit-testable.
  */
 
-import { EvidenceItem, isBehavioral, verificationSummary } from './evidence';
+import { EvidenceItem, currentEvidence, isBehavioral, verificationSummary } from './evidence';
 
 export type ExperimentState =
   | 'CREATED'
@@ -96,7 +96,8 @@ export interface DecisionInput {
  *    checks only.
  */
 export function decideAcceptance(input: DecisionInput): { decision: Decision; reasons: string[] } {
-  const { gates, evidence, filesChanged, outcome, behaviorRequired } = input;
+  const { gates, filesChanged, outcome, behaviorRequired } = input;
+  const evidence = currentEvidence(input.evidence);
   const reasons: string[] = [];
 
   if (outcome === 'stopped' || outcome === 'error') {
@@ -119,6 +120,10 @@ export function decideAcceptance(input: DecisionInput): { decision: Decision; re
     };
   }
 
+  if (evidence.some(i => isBehavioral(i) && i.result === 'inconclusive')) {
+    return { decision: 'NEEDS_REVIEW', reasons: ['a behavioural check has no conclusive result — rerun it before accepting'] };
+  }
+
   if (gates.diffReview === 'issues') {
     return { decision: 'NEEDS_REVIEW', reasons: ['the self-review left requirements unmet or unverified'] };
   }
@@ -131,7 +136,7 @@ export function decideAcceptance(input: DecisionInput): { decision: Decision; re
   }
 
   const summary = verificationSummary(evidence);
-  if (behaviorRequired && summary.behavioral === 0) {
+  if (behaviorRequired && !evidence.some(i => isBehavioral(i) && i.result === 'pass' && i.phase === 'post-edit')) {
     return {
       decision: 'NEEDS_REVIEW',
       reasons: ['behavioural verification was requested but no behavioural evidence exists'],

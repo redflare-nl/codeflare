@@ -1,6 +1,15 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { VLLMClient, ChatMessage } from '../llm/client';
+import { resolveJudgeTarget } from '../llm/judge';
+import { buildReflectionMessages, parseReflection } from '../engine/reflection';
+import { CalibrationPolicy, calibrationPolicy, computeCalibration } from '../engine/calibration';
+import {
+  DEFAULT_MISSION_BUDGET, MissionBudget, accumulateMissionUsage, checkMissionBudget, coerceMissionUsage, describeMissionUsage, resolveMissionBudget,
+} from '../engine/missionBudget';
+import { BacklogItem, BacklogStatus, describeBacklog, goalPrompt } from '../engine/backlog';
+import { setCalibrationNote } from '../llm/prompts';
+import { readTurnMetrics } from '../utils/metrics';
 import { buildSystemPrompt, buildMessages, CodeAction, setProjectInstructions, setProjectMap, setProjectStacks, setProjectMemory, setGroundingNote, groundingConcerns, setReviewMode, looksLikeReviewRequest, setProblemShape, classifyProblem } from '../llm/prompts';
 import { gatherContext, resolveActiveEditor } from '../editor/contextGatherer';
 import { hasEditBlocks, parseEditBlocks, applyEditsWithDiff, getPreviewProvider } from '../editor/editApplier';
@@ -21,13 +30,19 @@ import { getConfig, getDetectedModel, explicitModelSetting } from '../utils/conf
 import { hasApiKey, setApiKey } from '../utils/secrets';
 import { detectContextSize, detectModel, getContextSize } from '../utils/serverInfo';
 import { log, getRecentLog } from '../utils/logger';
-import { EvidenceItem, classifyToolEvidence, isBehavioral, makeEvidence, renderEvidenceLine, verificationSummary } from '../engine/evidence';
+import { EvidenceItem, classifyToolEvidence, currentEvidence, isBehavioral, makeEvidence, renderEvidenceLine, verificationSummary } from '../engine/evidence';
 import { ExperimentRecord, GateOutcomes, decideAcceptance, newExperiment, stateForDecision } from '../engine/experiment';
 import { TurnRunLog, appendExperiment } from '../engine/runlog';
-import { beginPolicyTurn, endPolicyTurn, gateToolCall } from '../engine/policyGate';
+import { beginPolicyTurn, endPolicyTurn, gateToolCall, GuardrailMode } from '../engine/policyGate';
 import { policyMessage } from '../engine/policy';
 import { VerificationConfig, compareMetrics, parseMetricValue, parseVerificationConfig, renderMetricComparisons } from '../engine/verificationConfig';
 import { Isolation, acceptIsolation, beginIsolation, parkIsolation, rejectIsolation } from '../engine/gitIsolation';
+import { MissionRecord, MissionPhase, newMission, restoreMission, transitionMission, setMissionStatus, buildResumePrompt } from '../engine/mission';
+import { AgentPool, AsyncMutex } from '../engine/agentPool';
+import { withAgentScope } from '../engine/agentScope';
+import { isTestCommand, testAuthorPrompt, testExecutionVerdict } from '../engine/testWorkflow';
+import { KnowledgeScope } from '../engine/scopedKnowledge';
+import { MemoryService } from '../engine/memoryService';
 
 /** Remove <think>…</think> reasoning blocks before storing assistant turns. */
 function stripThink(text: string): string {
@@ -42,6 +57,8 @@ interface SubagentResult {
   changedFiles: string[];
   tests: string;
   openIssues: string[];
+  evidence?: EvidenceItem[];
+  testCommand?: string;
 }
 
 /** Parse a sub-agent's final text into a structured result (from its <<<RESULT>>> block). */
@@ -73,6 +90,7 @@ function parseSubagentResult(task: string, text: string): SubagentResult {
     summary,
     changedFiles: listFiles(field('CHANGED')),
     tests: field('TESTS'),
+    testCommand: field('TEST_COMMAND'),
     openIssues: listIssues(field('OPEN')),
   };
 }
@@ -289,17 +307,49 @@ export class ChatViewProvider {
   private _metricBaselinePromise: Promise<void> | undefined;
   // Git experiment isolation for this turn (autonomous profiles only).
   private _isolation: Isolation | undefined;
+  private _mission?: MissionRecord;
+  private _missionWrite: Promise<void> = Promise.resolve();
+  private _resumePending = false;
+  private _turnFailed = false;
+  private _turnIncomplete = false;
+  private _missionPaused = false;
+  private _agentPool?: AgentPool;
+  private _agentMutationMutex = new AsyncMutex();
+  private _agentOwners = new Map<string, string>();
+  private _agentSequence = 0;
+  private _testStageRunning = false;
+  private _skillTrials = new Map<string, { name: string; scope: KnowledgeScope; version: number; at: number }>();
+  private _selfImprovementTask = false;
+  /** Cached per workspace root: is this window open on CodeFlare's own source? */
+  private _ownSourceRepo?: { root: string; own: boolean };
+  /** Set at mission end when an automatic reflection pass is due; consumed once the turn is idle. */
+  private _reflectAfterTurn = false;
+  /** This turn's measured claimed-vs-demonstrated policy for the model (engine/calibration.ts). */
+  private _calibration?: CalibrationPolicy;
+  /** Eligible skills deliberately WITHHELD this mission — the control arm of causal skill validation. */
+  private _skillHoldouts = new Map<string, { name: string; scope: KnowledgeScope; version: number; at: number }>();
+  /** The backlog goal a Night Shift run is currently working on. */
+  private _nightShiftItem?: BacklogItem;
+  private static readonly RESUME_RE = /^(plan approved|continue|resume|ga door|ga verder|verder|doorgaan)\b/i;
+  private _missionPersistenceError?: Error;
+  private _checkpointWrite: Promise<void> = Promise.resolve();
+  private _checkpointPersistenceError?: Error;
+  private _reloadPending = false;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _version: string = '',
-    private readonly _state?: vscode.Memento
+    private readonly _state?: vscode.Memento,
+    private readonly _knowledge?: MemoryService
   ) {
     this._client = new VLLMClient();
     if (this._state) {
       this._history = this._state.get<ChatMessage[]>('history', []);
       this._transcript = this._state.get<TranscriptEntry[]>('transcript', []);
       this._todos = this._state.get<Todo[]>('todos', []);
+      this._mission = restoreMission(this._state.get('mission'));
+      this._agentSequence = Math.max(0, ...this._mission?.agents.map(a => Number(a.id.replace(/^agent-/, '')) || 0) || []);
+      this._lastExperiment = this._state.get<ExperimentRecord>('lastExperiment');
     }
   }
 
@@ -309,6 +359,249 @@ export class ChatViewProvider {
     this._state.update('history', this._history.slice(-120));
     this._state.update('transcript', this._transcript.slice(-100));
     this._state.update('todos', this._todos);
+  }
+
+  private _publishMission(): void {
+    const snapshot = this._mission ? JSON.parse(JSON.stringify(this._mission)) : undefined;
+    if (this._state) {
+      this._missionWrite = this._missionWrite.then(async () => {
+        await this._state!.update('mission', snapshot);
+        this._missionPersistenceError = undefined;
+      }).catch(err => { this._missionPersistenceError = err; log(`Mission persistence failed: ${err.message}`); });
+    }
+    this._postMessage({ type: 'mission', mission: snapshot || null, maxParallelAgents: this._agentPool?.limit ?? getConfig().maxParallelAgents });
+  }
+
+  private _missionPhase(phase: MissionPhase, activity: string): void {
+    if (!this._mission || this._mission.status !== 'running') { return; }
+    this._mission = transitionMission(this._mission, phase, activity);
+    this._publishMission();
+  }
+
+  private _missionTool(name: string, raw: string): void {
+    if (!this._mission) { return; }
+    let args: any = {};
+    try { args = JSON.parse(raw || '{}'); } catch { /* label handles invalid arguments */ }
+    const label = describeToolCall(name, raw);
+    if (name === 'update_todos') { return; } // Status updates are not replanning.
+    if (isMutatingTool(name)) { this._missionPhase('build', label); }
+    else if (name === 'verify_visual' || name.startsWith('lab_') ||
+      (name === 'run_command' && isVerifyLikeCommand(args.command || ''))) {
+      this._missionPhase('verify', label);
+    } else {
+      this._missionPhase(this._mission.phase, label);
+    }
+  }
+
+  /** Resume deliberately: reread state; never replay an interrupted tool call. */
+  async resumeMission(): Promise<void> {
+    if (this._busy || !this._mission || this._mission.status === 'completed') { return; }
+    this.ensurePanel();
+    this._resumePending = true;
+    await this._handleUserMessage(buildResumePrompt(this._mission));
+  }
+
+  get isBusy(): boolean { return this._busy || this._reloadPending || this._subagentClients.size > 0; }
+  get missionCompleted(): boolean { return this._mission?.status === 'completed'; }
+
+  /** Reload only between turns, after all persistence has actually completed. */
+  async prepareForReload(): Promise<void> {
+    if (this.isBusy) { throw new Error('CodeFlare is still working. Finish or stop the active mission before reloading.'); }
+    this._reloadPending = true;
+    try {
+      if (this._state) {
+        await Promise.all([
+          this._state.update('history', this._history.slice(-120)),
+          this._state.update('transcript', this._transcript.slice(-100)),
+          this._state.update('todos', this._todos),
+          this._state.update('lastExperiment', this._lastExperiment),
+        ]);
+      }
+      await this._missionWrite;
+      if (this._missionPersistenceError) { throw new Error(`Mission could not be saved: ${this._missionPersistenceError.message}`); }
+      await this._checkpointWrite;
+      if (this._checkpointPersistenceError) { throw new Error(`Checkpoint could not be saved: ${this._checkpointPersistenceError.message}`); }
+    } catch (error) {
+      this._reloadPending = false;
+      throw error;
+    }
+  }
+
+  cancelPreparedReload(): void { this._reloadPending = false; }
+
+  private async _loadProjectFacts(): Promise<string> {
+    try { return await loadProjectMemory(); }
+    catch (error: any) {
+      log(`Project memory unavailable: ${error.message}`);
+      this._postMessage({ type: 'notice', text: `Projectgeheugen kon niet worden gelezen: ${error.message}` });
+      return '';
+    }
+  }
+
+  private async _loadSkillContext(query: string): Promise<string> {
+    try {
+      if (!this._knowledge) { return ''; }
+      // Causal skill validation: in a fraction of AUTONOMOUS missions an eligible
+      // skill is deliberately withheld, and the mission's outcome is later
+      // recorded as a CONTROL trial for it (see _validateSkillTrials). The draw is
+      // a deterministic hash of mission + skill, so every load within one mission
+      // agrees; interactive turns never withhold.
+      const rate = getConfig().skillHoldoutRate;
+      const mission = this._mission;
+      const withhold = mission?.autonomous && rate > 0
+        ? (name: string, scope: KnowledgeScope) => ChatViewProvider._holdoutDraw(`${mission.id}|${scope}|${name.toLowerCase()}`) < rate
+        : undefined;
+      const result = await this._knowledge.contextDetailed(query, withhold);
+      for (const ref of result.withheld) {
+        const key = `${ref.scope}:${ref.name.toLowerCase()}`;
+        if (!this._skillHoldouts.has(key)) { this._skillHoldouts.set(key, { name: ref.name, scope: ref.scope, version: ref.version, at: Date.now() }); }
+      }
+      if (result.withheld.length) {
+        log(`Skill holdout (control arm): ${result.withheld.map(r => `${r.name}@${r.version}`).join(', ')}`);
+        this._postMessage({ type: 'toolActivity', label: `skill holdout: ${result.withheld.length} eligible skill(s) withheld as a control trial` });
+      }
+      return result.text;
+    } catch (error: any) {
+      log(`Skill memory unavailable: ${error.message}`);
+      this._postMessage({ type: 'notice', text: `Skillgeheugen kon niet worden gelezen: ${error.message}` });
+      return '';
+    }
+  }
+
+  /**
+   * Guardrail mode for the coming turn. A self-improvement task locks the
+   * runtime's own guardrail files outright; any other turn inside the CodeFlare
+   * repository marks them protected (blocked in autonomous profiles, ordinary
+   * confirm flow when a human is watching). Elsewhere they are irrelevant — the
+   * paths simply do not exist in that project.
+   */
+  private async _guardrailMode(): Promise<GuardrailMode | undefined> {
+    if (this._selfImprovementTask) { return 'forbid'; }
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) { return undefined; }
+    if (this._ownSourceRepo?.root !== root.toString()) {
+      let own = false;
+      try {
+        const pkg = JSON.parse(new TextDecoder().decode(
+          await vscode.workspace.fs.readFile(vscode.Uri.joinPath(root, 'package.json'))));
+        own = pkg?.name === 'codeflare' && pkg?.publisher === 'local';
+      } catch { /* not a Node project, or no package.json — not our repo */ }
+      this._ownSourceRepo = { root: root.toString(), own };
+    }
+    return this._ownSourceRepo.own ? 'protect' : undefined;
+  }
+
+  private _judgeClient?: VLLMClient;
+  private _judgeKey = '';
+
+  /**
+   * The model that reviews work: an independent one when codeflare.judge*
+   * points elsewhere, otherwise the worker itself. Independence is a fact about
+   * the configuration and is reported alongside every verdict, never assumed.
+   */
+  private _judge(): { client: VLLMClient; independent: boolean; label: string } {
+    const resolved = resolveJudgeTarget(getConfig());
+    if (!resolved) {
+      this._judgeClient = undefined;
+      this._judgeKey = '';
+      return { client: this._client, independent: false, label: '' };
+    }
+    const key = JSON.stringify(resolved.target);
+    if (!this._judgeClient || this._judgeKey !== key) {
+      this._judgeClient = new VLLMClient(resolved.target);
+      this._judgeKey = key;
+    }
+    return { client: this._judgeClient, independent: true, label: resolved.label };
+  }
+
+  /** The autonomous mission budget: shipped defaults with the user's per-field overrides. */
+  private _missionBudget(): MissionBudget {
+    return resolveMissionBudget(DEFAULT_MISSION_BUDGET, getConfig().missionBudget);
+  }
+
+  /** FNV-1a over the seed, scaled to [0,1): the same mission+skill always draws the same number. */
+  private static _holdoutDraw(seed: string): number {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h / 0x100000000;
+  }
+
+  async showBacklog(): Promise<void> {
+    this.ensurePanel();
+    if (!this._knowledge) { this._postMessage({ type: 'notice', text: 'Memory storage is unavailable in this window, so there is no backlog.' }); return; }
+    const state = await this._knowledge.readBacklog();
+    const open = state.items.filter(i => i.status === 'open').length;
+    this._postMessage({ type: 'notice', text: `Backlog — ${open} open goal(s), derived from recorded evidence:\n${describeBacklog(state)}` });
+  }
+
+  /**
+   * NIGHT SHIFT: work the evidence-derived backlog, one goal per autonomous
+   * mission. The system chose the goals (reflection: recurring failures,
+   * contradictions, unaccepted missions); a human presses the button. Each
+   * mission runs under the ordinary gates, the guardrail lock and the mission
+   * budget. Refused in the interactive profile: unattended work must never
+   * block on a confirmation prompt nobody will answer.
+   */
+  async runNightShift(): Promise<void> {
+    this.ensurePanel();
+    const notice = (text: string) => this._postMessage({ type: 'notice', text });
+    if (!this._knowledge) { notice('Memory storage is unavailable in this window, so there is no backlog to work.'); return; }
+    if (this.isBusy) { notice('Finish or stop the current task before starting Night Shift.'); return; }
+    const cfg = getConfig();
+    if (cfg.autonomyProfile === 'interactive') {
+      notice('Night Shift needs codeflare.autonomyProfile set to conservative-autonomous or autonomous, so that no step can wait on a confirmation prompt while nobody is watching.');
+      return;
+    }
+    const attempted = new Set<string>();
+    let worked = 0;
+    for (let n = 0; n < cfg.nightShiftMaxItems; n++) {
+      const state = await this._knowledge.readBacklog();
+      const item = state.items.filter(i => i.status === 'open' && !attempted.has(i.id)).sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (!item) {
+        notice(worked ? `Night Shift finished: ${worked} goal(s) worked; no further open goals.` : 'Night Shift: the backlog has no open goals. Run CodeFlare: Reflect on Experience first.');
+        return;
+      }
+      attempted.add(item.id);
+      await this._knowledge.updateBacklog(s => { const it = s.items.find(i => i.id === item.id); if (it) { it.status = 'running'; } });
+      this._postMessage({ type: 'addUserMessage', text: `🌙 Night Shift ${n + 1}/${cfg.nightShiftMaxItems} — ${item.title}` });
+      log(`Night Shift: starting goal ${item.id} (${item.source}): ${item.title}`);
+      this._nightShiftItem = item;
+      try {
+        await this._handleUserMessage(goalPrompt(item));
+      } finally {
+        const mission = this._mission;
+        const status: BacklogStatus = mission?.status === 'completed' ? 'done' : mission?.status === 'failed' ? 'failed' : 'open';
+        const outcome = mission ? `${mission.status}: ${mission.activity}` : 'no mission record';
+        await this._knowledge.updateBacklog(s => {
+          const it = s.items.find(i => i.id === item.id);
+          if (it) { it.status = status; it.outcome = outcome.slice(0, 400); if (mission) { it.missionId = mission.id; } }
+        }).catch((error: Error) => log(`Backlog update failed: ${error.message}`));
+        this._nightShiftItem = undefined;
+        worked++;
+        log(`Night Shift: goal ${item.id} → ${status} (${outcome})`);
+      }
+      if (this._stopRequested) { notice(`Night Shift stopped by the user after ${worked} goal(s).`); return; }
+    }
+    notice(`Night Shift finished: ${worked} goal(s) worked. Use CodeFlare: Show Backlog for outcomes.`);
+  }
+
+  reportSelfUpdate(status: string, detail: string): void {
+    this._postMessage({ type: 'selfUpdate', status, detail });
+  }
+
+  async improveSelf(request: string): Promise<void> {
+    if (this.isBusy) { throw new Error('Finish or stop the current mission before starting self-improvement.'); }
+    this.ensurePanel();
+    this._selfImprovementTask = true;
+    try {
+    await this._handleUserMessage(
+      'SELF-IMPROVEMENT TASK: improve CodeFlare itself in this source workspace. ' +
+      'First inspect the repository and establish a reproducible baseline. Make one bounded improvement ' +
+      'with regression tests. Preserve permission rules, budgets, evaluation criteria, and the update/recovery mechanism. ' +
+      'Do not install, deploy, reload, or alter the installed extension using shell tools. ' +
+      'The independent updater will validate and activate the candidate after this task. ' +
+      'Report measured benefits separately from unproven hypotheses.\n\nRequested improvement: ' + request);
+    } finally { this._selfImprovementTask = false; }
   }
 
   /** Read a workspace-relative file's text, or '' if missing. */
@@ -346,6 +639,9 @@ export class ChatViewProvider {
     } catch {
       this._activeCheckpoint.files.set(key, null); // didn't exist before this turn
     }
+    const cp = this._activeCheckpoint;
+    await this._queueCheckpoint({ id: cp.id, time: cp.time,
+      files: [...cp.files].map(([p, c]) => ({ path: p, oldContent: c })) });
   }
 
   /** Close the turn's checkpoint; if it captured writes, offer a revert button. */
@@ -361,10 +657,16 @@ export class ChatViewProvider {
     };
     this._checkpoints.push(record);
     if (this._checkpoints.length > 15) { this._checkpoints.shift(); }
-    // Persist so a revert still works after a window reload (best-effort).
-    void this._persistCheckpoint(record);
+    void this._queueCheckpoint(record);
     this._postMessage({ type: 'checkpoint', id: cp.id, count: cp.files.size });
     log(`Checkpoint ${cp.id}: ${cp.files.size} file(s) captured`);
+  }
+
+  private _queueCheckpoint(record: { id: string; time: number; files: Array<{ path: string; oldContent: string | null }> }): Promise<void> {
+    this._checkpointWrite = this._checkpointWrite.then(() => this._persistCheckpoint(record))
+      .then(() => { this._checkpointPersistenceError = undefined; })
+      .catch((error: Error) => { this._checkpointPersistenceError = error; log(`Checkpoint persist failed: ${error.message}`); });
+    return this._checkpointWrite;
   }
 
   /** Write one checkpoint to .codeflare/checkpoints/ and prune to the newest 15. */
@@ -374,9 +676,9 @@ export class ChatViewProvider {
     try {
       const dir = vscode.Uri.joinPath(root, '.codeflare', 'checkpoints');
       await vscode.workspace.fs.createDirectory(dir);
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.joinPath(dir, `${record.id}.json`),
-        new TextEncoder().encode(JSON.stringify(record)));
+      const pending = vscode.Uri.joinPath(dir, `${record.id}.tmp`);
+      await vscode.workspace.fs.writeFile(pending, new TextEncoder().encode(JSON.stringify(record)));
+      await vscode.workspace.fs.rename(pending, vscode.Uri.joinPath(dir, `${record.id}.json`), { overwrite: true });
       const entries = (await vscode.workspace.fs.readDirectory(dir))
         .filter(([n, k]) => k === vscode.FileType.File && n.endsWith('.json'))
         .sort(([a], [b]) => a.localeCompare(b));   // ids are Date.now() → lexicographic = chronological
@@ -384,7 +686,7 @@ export class ChatViewProvider {
         await vscode.workspace.fs.delete(vscode.Uri.joinPath(dir, name));
       }
     } catch (err: any) {
-      log(`Checkpoint persist failed: ${err.message}`);
+      throw err;
     }
   }
 
@@ -475,6 +777,9 @@ export class ChatViewProvider {
       return acc.sort().join('\n');
     };
     const inCounts = countLeaves(incoming);
+    if (inCounts.total > 0 && leafTexts(incoming) !== leafTexts(this._todos)) {
+      this._missionPhase('design', 'Plan en acceptatiecriteria uitwerken');
+    }
     const isNewPlan =
       this._currentRound === 0 &&
       !this._approvalTurn &&
@@ -508,7 +813,7 @@ export class ChatViewProvider {
     this._persist();
     const { total, done } = countLeaves(this._todos);
 
-    if (isNewPlan && getConfig().planApproval) {
+    if (isNewPlan && getConfig().planApproval && !this._mission?.autonomous) {
       this._planAwaitingReview = true;
       return `Plan recorded (${total} steps) and shown to the user. STOP NOW — the user will ` +
         `review the plan first. Do not execute anything until they approve or give feedback.`;
@@ -575,8 +880,41 @@ export class ChatViewProvider {
    * own client (so several can run in parallel without clobbering each other's
    * request state) and its own scratch context. Returns a STRUCTURED result.
    */
-  private async _runOneSubagent(task: string, client: VLLMClient, tag: string): Promise<SubagentResult> {
+  private async _runOneSubagent(task: string, client: VLLMClient, tag: string, testsOnly = false): Promise<SubagentResult> {
+    const id = `agent-${++this._agentSequence}`;
+    this._agentPool ??= new AgentPool(getConfig().maxParallelAgents);
+    const update = (status: 'queued' | 'running' | 'success' | 'partial' | 'failed' | 'interrupted', activity: string) => {
+      if (!this._mission) { return; }
+      const previous = this._mission.agents.find(a => a.id === id);
+      const agent = { id, task: task.slice(0, 300), status, activity };
+      this._mission = { ...this._mission, agents: previous
+        ? this._mission.agents.map(a => a.id === id ? agent : a)
+        : [...this._mission.agents, agent].slice(-256) };
+      this._publishMission();
+    };
+    update('queued', 'Wacht op beschikbare capaciteit');
+    const changedFiles = new Set<string>();
+    try {
+      return await this._agentPool.run(async () => {
+        if (this._stopRequested) { throw new Error('Mission stopped'); }
+        update('running', testsOnly ? 'Tests schrijven vanuit de oorspronkelijke opdracht' : 'Opdracht uitvoeren');
+        const result = await withAgentScope(id, this._agentOwners, testsOnly, changedFiles,
+          () => this._executeSubagent(task, client, tag, activity => update('running', activity)),
+          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
+        result.changedFiles = [...changedFiles];
+        if (this._stopRequested) { result.status = 'partial'; }
+        update(this._stopRequested ? 'interrupted' : result.status, result.summary);
+        return result;
+      });
+    } catch (error: any) {
+      update(this._stopRequested ? 'interrupted' : 'failed', error.message);
+      return { task, status: 'failed', summary: error.message, changedFiles: [...changedFiles], tests: '', openIssues: [error.message] };
+    }
+  }
+
+  private async _executeSubagent(task: string, client: VLLMClient, tag: string, onActivity: (activity: string) => void): Promise<SubagentResult> {
     const config = getConfig();
+    const learnedContext = await this._loadSkillContext(task);
     const system =
       'You are a focused sub-agent inside CodeFlare. Complete the given task using your tools. ' +
       'Do not ask questions — make reasonable assumptions. Keep going until the task is done or ' +
@@ -587,8 +925,13 @@ export class ChatViewProvider {
       'SUMMARY: <one or two sentences on what you did>\n' +
       'CHANGED: <comma-separated files you created/edited, or none>\n' +
       'TESTS: <how you verified it (command + outcome), or none>\n' +
+      'TEST_COMMAND: <existing one-shot project test command for coordinator execution, or none>\n' +
       'OPEN: <remaining issues or follow-ups, or none>\n' +
-      '<<<END>>>';
+      '<<<END>>>\n' +
+      'You share the workspace with other agents. File ownership conflicts must be reported, not bypassed. ' +
+      'Shell, external API mutations, MCP, debugger and further delegation are handled by the coordinator after integration. ' +
+      'Do not claim tests ran here. Follow the project conventions and instructions below.\n' +
+      buildSystemPrompt(gatherContext()) + '\n' + learnedContext;
     const messages: ChatMessage[] = [
       { role: 'system', content: system },
       { role: 'user', content: task },
@@ -596,12 +939,14 @@ export class ChatViewProvider {
     // Same tools, minus delegation/planning/debug to avoid recursion and shared state.
     const tools = getToolDefinitions({
       write: config.agentEdit,
-      run: config.agentRunCommands,
+      run: false,
       web: config.webAccess,
       subagent: false,
       plan: false,
-      probes: config.agentProbes,
-    });
+      probes: false,
+    }).filter(t => !isMcpTool(t.function.name) && !t.function.name.startsWith('api_') &&
+      !['remember', 'forget', 'rename_symbol', 'screenshot_url'].includes(t.function.name));
+    const allowedTools = new Set(tools.map(t => t.function.name));
 
     let finalText = '';
     let emptyNudges = 0;
@@ -642,14 +987,23 @@ export class ChatViewProvider {
       messages.push({ role: 'assistant', content: stripThink(result.content), tool_calls: result.toolCalls });
       for (const call of result.toolCalls) {
         if (this._stopRequested) { break; }
+        onActivity(describeToolCall(call.function.name, call.function.arguments));
         this._postMessage({
           type: 'toolActivity',
           label: `↳${tag} ${describeToolCall(call.function.name, call.function.arguments)}`,
           copy: copyableCommand(call.function.name, call.function.arguments),
         });
-        const out = isMcpTool(call.function.name)
-          ? await callMcpTool(call.function.name, call.function.arguments)
-          : await executeTool(call.function.name, call.function.arguments);
+        const runTool = async () => {
+          if (this._stopRequested) { return 'Mission stopped. Tool not executed.'; }
+          if (!allowedTools.has(call.function.name)) { return 'This tool is unavailable to subagents; return the action to the coordinator.'; }
+          const budget = gateToolCall();
+          if (!budget.allowed) { return policyMessage(budget); }
+          return executeTool(call.function.name, call.function.arguments);
+        };
+        const out = isMutatingTool(call.function.name)
+          ? await this._agentMutationMutex.runExclusive(runTool) : await runTool();
+        this._recordEvidence(call.function.name, call.function.arguments, out);
+        this._runLog?.append('tool', { name: call.function.name, label: `subagent ${tag}`, result: out.slice(0, 300) });
         messages.push({ role: 'tool', tool_call_id: call.id, content: out });
       }
     }
@@ -670,7 +1024,9 @@ export class ChatViewProvider {
     let task = '';
     try { task = (JSON.parse(rawArgs || '{}').task || '').trim(); } catch { /* ignore */ }
     if (!task) { return 'No task provided to run_subagent.'; }
+    this._agentOwners.clear();
     const r = await this._runOneSubagent(task, new VLLMClient(), '');
+    this._agentOwners.clear();
     return formatSubagentResult(r);
   }
 
@@ -683,18 +1039,16 @@ export class ChatViewProvider {
     } catch { /* ignore */ }
     if (tasks.length === 0) { return 'No tasks provided to run_subagents (expects a "tasks" array).'; }
 
-    const MAX_PARALLEL = 4;
-    if (tasks.length > MAX_PARALLEL) {
-      return `Too many parallel tasks (${tasks.length}); cap is ${MAX_PARALLEL}. ` +
-        `Split into smaller batches, or run some sequentially with run_subagent.`;
+    if (tasks.length > 128) {
+      return 'A batch may contain at most 128 tasks. Split larger plans into batches.';
     }
-
-    this._postMessage({ type: 'toolActivity', label: `running ${tasks.length} subagents in parallel…` });
+    this._agentOwners.clear();
+    this._postMessage({ type: 'toolActivity', label: `${tasks.length} subagent tasks; up to ${getConfig().maxParallelAgents} active…` });
     // Each subagent gets its OWN client so concurrent requests don't share the
     // single abort controller / request state.
     const batchStarted = Date.now();
     const results = await Promise.all(
-      tasks.map((task, i) => this._runOneSubagent(task, new VLLMClient(), `[${String.fromCharCode(65 + i)}]`)
+      tasks.map((task, i) => this._runOneSubagent(task, new VLLMClient(), `[${i + 1}]`)
         .catch((e): SubagentResult => ({
           task, status: 'failed', summary: `Crashed: ${e?.message || e}`, changedFiles: [], tests: '', openIssues: [],
         })))
@@ -729,7 +1083,8 @@ export class ChatViewProvider {
     const header = `Ran ${results.length} subagents in parallel — ` +
       `${counts.success} success, ${counts.partial} partial, ${counts.failed} failed. ` +
       `Review each and integrate/redo as needed:`;
-    return `${header}\n\n${results.map((r, i) => formatSubagentResult(r, String.fromCharCode(65 + i))).join('\n\n')}`;
+    this._agentOwners.clear();
+    return `${header}\n\n${results.map((r, i) => formatSubagentResult(r, String(i + 1))).join('\n\n')}`;
   }
 
   /**
@@ -848,8 +1203,9 @@ export class ChatViewProvider {
           // abort the in-flight request — including any running subagents, whose
           // clients the main _client.abort() doesn't reach. Drop queued messages.
           this._stopRequested = true;
+          this._agentPool?.cancelPending('Mission stopped by user');
           this._queue.length = 0;
-          this._client.abort();
+          this._client.abort(); this._judgeClient?.abort();
           for (const c of this._subagentClients) { c.abort(); }
           break;
         case 'clearChat':
@@ -857,6 +1213,13 @@ export class ChatViewProvider {
           // pending history/compaction writes instead of repopulating the
           // cleared conversation with orphaned assistant/tool messages.
           this._historyEpoch++;
+          this._stopRequested = true;
+          this._queue.length = 0;
+          this._agentPool?.cancelPending('Chat cleared');
+          this._client.abort(); this._judgeClient?.abort();
+          for (const c of this._subagentClients) { c.abort(); }
+          this._mission = undefined;
+          this._publishMission();
           this._history = [];
           this._transcript = [];
           this._todos = [];
@@ -864,10 +1227,14 @@ export class ChatViewProvider {
           this._postMessage({ type: 'chatCleared' });
           break;
         case 'requestHistory':
+          this._publishMission();
           this._postMessage({ type: 'restoreTranscript', transcript: this._transcript });
           if (this._todos.length > 0) {
             this._postMessage({ type: 'todos', todos: this._todos });
           }
+          break;
+        case 'resumeMission':
+          await this.resumeMission();
           break;
         case 'applyEdit':
           await this._handleApplyEdit(msg.searchReplace);
@@ -901,9 +1268,16 @@ export class ChatViewProvider {
           break;
         case 'getConfig':
           this._sendConfigState();
+          this._sendMemoryState();
           break;
         case 'saveConfig':
           await this._handleSaveConfig(msg.config);
+          break;
+        case 'clearMemory':
+          await this._handleClearMemory(msg.scope);
+          break;
+        case 'reflectMemory':
+          await this.reflectMemory('manual');
           break;
         case 'revertCheckpoint':
           await this._revertCheckpoint(msg.id);
@@ -1063,6 +1437,9 @@ export class ChatViewProvider {
         hasToken: hasApiKey(),
         trustedCommands: config.trustedCommands,
         confirmCommands: config.confirmCommands,
+        maxParallelAgents: config.maxParallelAgents,
+        autonomousMode: config.autonomousMode,
+        autoTest: config.autoTest,
         contextSize: getContextSize(),
       },
     });
@@ -1080,6 +1457,115 @@ export class ChatViewProvider {
     });
   }
 
+  /**
+   * Erase stored memory on the user's request. Irreversible, so it confirms in a
+   * modal naming the exact scope first — the webview button alone is not consent.
+   * The outcome reports the real counts: "cleared" without numbers would be
+   * indistinguishable from a no-op that silently kept everything.
+   */
+  private async _handleClearMemory(scope: unknown): Promise<void> {
+    const target: 'project' | 'global' | 'all' =
+      scope === 'global' || scope === 'all' ? scope : 'project';
+    if (!this._knowledge) {
+      this._postMessage({ type: 'notice', text: 'Memory storage is unavailable in this window, so there is nothing to clear.' });
+      return;
+    }
+    const what = target === 'project' ? 'this project\'s memory'
+      : target === 'global' ? 'the reusable agent memory shared by every project'
+      : 'ALL memory — this project and the reusable agent memory';
+    const confirmed = await vscode.window.showWarningMessage(
+      `Permanently erase ${what}?`,
+      {
+        modal: true,
+        detail: 'Learned skills, recorded experiments, embeddings and stored artifacts are deleted' +
+          (target === 'global' ? '.' : ', along with the durable project facts.') +
+          ' This cannot be undone.',
+      },
+      'Erase memory',
+    );
+    if (confirmed !== 'Erase memory') { return; }
+
+    try {
+      const result = await this._knowledge.clearMemory(target);
+      const parts: string[] = [];
+      for (const [name, records] of [['project', result.project], ['agent', result.global]] as const) {
+        if (!records) { continue; }
+        parts.push(`${name}: ${records.states} record set(s), ${records.embeddings} embedding(s), ${records.artifacts} artifact(s)`);
+      }
+      if (result.facts !== undefined) { parts.push(`${result.facts} project fact(s)`); }
+      const detail = parts.length ? parts.join(' · ') : 'nothing was stored';
+      this._postMessage({ type: 'notice', text: `Memory cleared — ${detail}.` });
+      log(`Memory cleared (${target}): ${detail}`);
+      this._sendMemoryState();
+    } catch (error) {
+      const message = (error as Error).message;
+      this._postMessage({ type: 'notice', text: `Could not clear memory: ${message}` });
+      log(`Memory clear failed (${target}): ${message}`);
+    }
+  }
+
+  /**
+   * Reflection: distil recorded experiments into CANDIDATE skills, constraints
+   * and surfaced contradictions. Runs on the independent judge when one is
+   * configured. Reflection never validates — a candidate it produces has to
+   * prove itself in a later mission like any other. The outcome is reported
+   * with real counts and the rejections, so "reflected" never hides a no-op.
+   */
+  async reflectMemory(trigger: 'manual' | 'auto'): Promise<void> {
+    const notice = (text: string) => { if (trigger === 'manual') { this._postMessage({ type: 'notice', text }); } else { log(`Auto-reflection: ${text}`); } };
+    if (!this._knowledge) { notice('Memory storage is unavailable in this window, so there is nothing to reflect on.'); return; }
+    if (this._busy) { notice('CodeFlare is still working — reflect when the current task finishes.'); return; }
+    try {
+      const input = await this._knowledge.reflectionInput();
+      if (input.episodes.length < 3) {
+        notice(`Not enough recorded experience to reflect on yet (${input.episodes.length} experiment(s); at least 3 are needed).`);
+        return;
+      }
+      const judge = this._judge();
+      this._postMessage({ type: 'toolActivity', label: `reflecting on ${input.episodes.length} recorded experiment(s)` +
+        (judge.independent ? ` — judge ${judge.label}` : '') });
+      const text = await judge.client.complete(buildReflectionMessages(input) as ChatMessage[], 2500);
+      if (!text) { notice('Reflection produced no usable output (empty or truncated) — nothing was recorded.'); return; }
+      const parsed = parseReflection(text, input);
+      const outcome = await this._knowledge.applyReflection(parsed.proposal);
+      // Goals for Night Shift follow from the same evidence (engine/backlog.ts).
+      const goals = await this._knowledge.deriveBacklog({
+        recurringFailures: outcome.recurringFailures, contradictions: outcome.contradictions, episodes: input.episodes,
+      }).catch((error: Error) => { log(`Backlog derivation failed: ${error.message}`); return []; });
+      const rejected = [...parsed.rejected, ...outcome.rejected];
+      const lines = [
+        `Reflection over ${input.episodes.length} experiment(s): ${outcome.skillsSaved.length} candidate skill(s) saved (unvalidated), ` +
+        `${outcome.constraintsSaved.length} constraint(s) recorded, ${outcome.contradictions.length} contradiction(s), ` +
+        `${outcome.recurringFailures.length} recurring failure pattern(s), ${goals.length} new backlog goal(s); ${rejected.length} proposal(s) rejected.`,
+        ...goals.map(g => `→ backlog goal: ${g.title}`),
+        ...outcome.skillsSaved.map(s => `• candidate skill: ${s}`),
+        ...outcome.constraintsSaved.map(c => `• constraint: ${c}`),
+        ...outcome.contradictions.map(c => `⚠ contradiction between ${c.skills.join(' and ')}: ${c.why}`),
+        ...outcome.recurringFailures.map(r => `↻ recurring: ${r.pattern} (${r.episodeIds.length} episodes)`),
+        ...rejected.slice(0, 6).map(r => `✗ ${r}`),
+        ...(rejected.length > 6 ? [`✗ …and ${rejected.length - 6} more`] : []),
+      ];
+      notice(lines.join('\n'));
+      log(`Memory reflection (${trigger}${judge.independent ? `, judge ${judge.label}` : ''}): ${lines[0]}`);
+      this._sendMemoryState();
+    } catch (error) {
+      notice(`Reflection failed: ${(error as Error).message}`);
+      log(`Memory reflection failed (${trigger}): ${(error as Error).message}`);
+    }
+  }
+
+  /** Push current memory counts to the settings panel so the user sees what exists. */
+  private _sendMemoryState(): void {
+    if (!this._knowledge) {
+      this._postMessage({ type: 'memoryState', state: { available: false } });
+      return;
+    }
+    this._knowledge.status().then(
+      status => this._postMessage({ type: 'memoryState', state: { available: true, ...status } }),
+      error => this._postMessage({ type: 'memoryState', state: { available: false, error: (error as Error).message } }),
+    );
+  }
+
   private async _handleSaveConfig(cfg: {
     provider?: string;
     endpoint?: string;
@@ -1087,8 +1573,23 @@ export class ChatViewProvider {
     token?: string;
     trustedCommands?: string[];
     confirmCommands?: boolean;
+    maxParallelAgents?: number;
+    autonomousMode?: boolean;
+    autoTest?: boolean;
   }): Promise<void> {
     const settings = vscode.workspace.getConfiguration('codeflare');
+    for (const key of ['autonomousMode', 'autoTest'] as const) {
+      if (typeof cfg[key] === 'boolean') { await settings.update(key, cfg[key], vscode.ConfigurationTarget.Global); }
+    }
+    if (typeof cfg.maxParallelAgents === 'number' && Number.isInteger(cfg.maxParallelAgents) && cfg.maxParallelAgents >= 1 && cfg.maxParallelAgents <= 32) {
+      await settings.update('maxParallelAgents', cfg.maxParallelAgents, vscode.ConfigurationTarget.Global);
+    }
+    if (cfg.provider === undefined && cfg.endpoint === undefined && cfg.model === undefined &&
+        cfg.token === undefined && cfg.trustedCommands === undefined && cfg.confirmCommands === undefined) {
+      this._sendConfigState();
+      this._publishMission();
+      return;
+    }
     // Provider must be written BEFORE the token — the token is stored per
     // provider, and setApiKey() keys off the now-active provider.
     if (cfg.provider === 'local' || cfg.provider === 'openai' || cfg.provider === 'anthropic') {
@@ -1129,7 +1630,7 @@ export class ChatViewProvider {
   }
 
   async sendCodeAction(action: CodeAction, text: string, filePath: string, language: string): Promise<void> {
-    if (this._busy) {
+    if (this.isBusy) {
       vscode.window.showWarningMessage('CodeFlare is busy with another request — try again when it finishes.');
       return;
     }
@@ -1157,6 +1658,7 @@ export class ChatViewProvider {
         forbiddenPaths: cfgAction.forbiddenPaths,
       },
       budgetOverrides: cfgAction.changeBudget,
+      guardrails: await this._guardrailMode(),
     });
 
     // Same pre-turn setup as the chat path: refresh the project map and snapshot
@@ -1168,7 +1670,7 @@ export class ChatViewProvider {
     }
     // Executables first: remembered "[exe]" facts can upgrade stack commands
     // (e.g. the Godot verify task bakes in the discovered binary path).
-    const mem2 = await loadProjectMemory();
+    const mem2 = await this._loadProjectFacts();
     setProjectMemory(mem2);
     if (loadExecutablesFromMemory(mem2)) { invalidateStacks(); }
     setProjectStacks(stacksPromptBlock(await getStacks()));
@@ -1187,8 +1689,8 @@ export class ChatViewProvider {
       };
     }
 
-    const systemPrompt = buildSystemPrompt(context, action);
     const userMessage = `${action}: \n\`\`\`${language}\n${text}\n\`\`\``;
+    const systemPrompt = buildSystemPrompt(context, action) + '\n' + await this._loadSkillContext(userMessage);
     // The diff review judges the change against this turn's request.
     this._turnRequest = userMessage;
 
@@ -1223,6 +1725,13 @@ export class ChatViewProvider {
     // Bump the epoch so a turn finishing after this clear drops its pending
     // history writes instead of repopulating the cleared conversation.
     this._historyEpoch++;
+    this._stopRequested = true;
+    this._agentPool?.cancelPending('Chat cleared');
+    this._client.abort(); this._judgeClient?.abort();
+    for (const c of this._subagentClients) { c.abort(); }
+    this._queue.length = 0;
+    this._mission = undefined;
+    this._publishMission();
     this._history = [];
     this._transcript = [];
     this._todos = [];
@@ -1235,6 +1744,10 @@ export class ChatViewProvider {
     images?: string[],
     files?: { name: string; content: string }[]
   ): Promise<void> {
+    if (this._reloadPending) {
+      this._postMessage({ type: 'notice', text: 'CodeFlare bereidt een herstart voor. Verstuur je opdracht opnieuw nadat VS Code is herladen.' });
+      return;
+    }
     // Re-entrancy guard: a second send while a turn is running would interleave
     // two agent loops in one history (corrupting tool pairing). Queue it instead.
     if (this._busy) {
@@ -1242,20 +1755,70 @@ export class ChatViewProvider {
       this._postMessage({ type: 'notice', text: 'CodeFlare is still working — your message is queued and will run next.' });
       return;
     }
+    // Mission budget (engine/missionBudget.ts): resuming an autonomous mission
+    // that has exhausted its cumulative ceiling is refused HERE, before anything
+    // is armed, with the reason and the setting that raises it.
+    if (this._mission && this._mission.status !== 'completed' && this._mission.autonomous &&
+        (this._resumePending || ChatViewProvider.RESUME_RE.test(text.trim()))) {
+      const verdict = checkMissionBudget(coerceMissionUsage(this._mission.usage), this._missionBudget());
+      if (!verdict.allowed) {
+        this._mission = setMissionStatus(this._mission, 'paused', `Mission budget reached: ${verdict.reason}`);
+        this._publishMission();
+        this._resumePending = false;
+        this._postMessage({ type: 'notice', text: `Mission budget reached — ${verdict.reason}. The mission stays paused ` +
+          `(${describeMissionUsage(coerceMissionUsage(this._mission.usage), this._missionBudget())}). Raise codeflare.missionBudget, or start a new task.` });
+        return;
+      }
+    }
     this._busy = true;
     this._stopRequested = false;
 
     // Start this turn's metrics (recorded to .codeflare/metrics.jsonl at the end).
     const cfg0 = getConfig();
+    this._turnFailed = false;
+    this._turnIncomplete = false;
+    this._missionPaused = false;
+    this._agentPool = new AgentPool(cfg0.maxParallelAgents);
+    this._agentOwners.clear();
+    this._skillTrials.clear();
+    this._skillHoldouts.clear();
+    if (this._mission && this._mission.status !== 'completed' &&
+        (this._resumePending || ChatViewProvider.RESUME_RE.test(text.trim()))) {
+      this._mission = setMissionStatus(this._mission, 'running', 'Opgeslagen opdracht hervatten; huidige toestand controleren');
+    } else {
+      // Self-improvement and Night Shift always run as autonomous missions: the
+      // mission budget, holdouts and guardrails key off this flag.
+      const unattended = this._selfImprovementTask || !!this._nightShiftItem;
+      this._mission = newMission(text, { autonomous: cfg0.autonomousMode || unattended,
+        autoTest: cfg0.autoTest || cfg0.autonomousMode || unattended });
+      this._agentSequence = 0;
+    }
+    this._resumePending = false;
+    this._publishMission();
     this._turnMetrics = cfg0.metrics ? newTurnMetrics(cfg0.model, cfg0.provider) : undefined;
+    // Calibration (engine/calibration.ts): this model's own measured record of
+    // "done" vs demonstrated in this workspace, fed back into the prompt and the
+    // requirement review. Only an adequate sample changes anything.
+    this._calibration = undefined;
+    setCalibrationNote('');
+    if (cfg0.metrics) {
+      try {
+        const policy = calibrationPolicy(computeCalibration(await readTurnMetrics(), cfg0.model));
+        if (policy.note) { this._calibration = policy; setCalibrationNote(policy.note); }
+        if (policy.requireBehavioralEvidence) {
+          if (this._turnMetrics) { this._turnMetrics.calibrationApplied = true; }
+          this._postMessage({ type: 'toolActivity', label: 'calibration: this model\'s record makes a behavioural check mandatory this turn' });
+        }
+      } catch (error: any) { log(`Calibration unavailable: ${error.message}`); }
+    }
     this._turnChangedFiles = new Set();
-    this._turnRequest = text;
+    this._turnRequest = this._mission.task;
     // The experiment record + chronological run log for this turn. The record
     // annotates what the loop does; at turn end an acceptance decision is made
     // fail-closed and both are persisted under .codeflare/.
     this._experiment = newExperiment(text, cfg0.model, cfg0.provider);
     this._runLog = new TurnRunLog(text, cfg0.model, cfg0.provider);
-
+    try {
     // Project instructions (CODEFLARE.md) are re-read each turn — cheap, and
     // edits to the file take effect immediately.
     await this._loadProjectInstructions();
@@ -1276,7 +1839,7 @@ export class ChatViewProvider {
     // re-trust any executables it discovered before (so they still skip
     // prompts). This runs BEFORE stack detection: remembered executables can
     // upgrade stack commands (e.g. the Godot verify task bakes in the path).
-    const mem = await loadProjectMemory();
+    const mem = await this._loadProjectFacts();
     setProjectMemory(mem);
     if (loadExecutablesFromMemory(mem)) { invalidateStacks(); }
     // Detect the project's stacks (per module) so the model sees how to build/
@@ -1295,10 +1858,21 @@ export class ChatViewProvider {
       // mutation of the turn — after it, the pre-change state is gone.
       await this._captureMetricBaseline();
       if (rel) { this._turnMutatedPaths.add(rel.replace(/\\/g, '/')); }
+      this._verifiedSteps.clear();
+      if (this._mission) {
+        this._mission.changedFiles = [...new Set([...this._mission.changedFiles, ...this._turnMutatedPaths])];
+        if (this._mission.testStatus === 'passed') { this._mission.testStatus = 'pending'; }
+        this._missionPhase(this._testStageRunning ? 'verify' : 'build',
+          this._testStageRunning ? `Test schrijven: ${rel}` : `Bestand aanpassen: ${rel}`);
+      }
       return this._captureCheckpoint(rel);
     });
 
     // Arm the deterministic policy gate for this turn (budgets + path rules).
+    const guardrails = await this._guardrailMode();
+    if (guardrails === 'forbid') {
+      this._postMessage({ type: 'toolActivity', label: 'guardrails locked: policy/evidence/isolation/self-update files are read-only this task' });
+    }
     beginPolicyTurn({
       profile: cfg0.autonomyProfile,
       paths: {
@@ -1307,6 +1881,7 @@ export class ChatViewProvider {
         forbiddenPaths: cfg0.forbiddenPaths,
       },
       budgetOverrides: cfg0.changeBudget,
+      guardrails,
     });
 
     // Autonomous profiles run the experiment on an isolated git branch so the
@@ -1383,20 +1958,63 @@ export class ChatViewProvider {
     // advisory turns (the review block owns those) and whenever no strong signal
     // fires — so trivial edits pay nothing and stay fast.
     setProblemShape(isReview ? null : classifyProblem(text));
-    const systemPrompt = buildSystemPrompt(context);
+    const learnedContext = await this._loadSkillContext(this._turnRequest);
+    const systemPrompt = buildSystemPrompt(context) + '\n' + learnedContext + (this._mission?.autonomous
+      ? '\n\nAUTONOMOUS MISSION: Define observable acceptance criteria, examine the existing project, and research only material unknowns. ' +
+        'Record important sources, tooling and UX decisions, and unresolved assumptions with record_landscape. ' +
+        'Use independent subagents for separable work; integrate their files and run shared commands yourself. ' +
+        'Respect existing permissions and budgets. Do not stop at a plan. An independent test author will check changed code after implementation. ' +
+        'Persist reusable procedures as candidate skills using save_skill. Use scope=project for project-specific knowledge; ' +
+        'use scope=global only for general methods that can help other projects, with project names, private paths, secrets and customer details removed. ' +
+        'Project landscapes and facts stay local to this workspace. Candidate skills are not authoritative instructions.' : '');
     setGroundingNote([]);
     setReviewMode(false);
     setProblemShape(null);
+    setCalibrationNote('');
 
-    try {
       await this._streamResponse(systemPrompt, modelText, context, images);
+      if (!this._stopRequested && !this._turnFailed && !this._turnIncomplete && !this._missionPaused &&
+          !this._verifyOnlyTurn && this._mission?.autoTest && this._mission.changedFiles.length > 0) {
+        await this._runTestStage();
+      }
+    } catch (error: any) {
+      this._turnFailed = true;
+      this._postMessage({ type: 'streamError', error: error.message });
     } finally {
       this._finishCheckpoint();
       endPolicyTurn();
       // Decide + persist the experiment BEFORE metrics are cleared (it reads
       // the round count from them). Awaited: git isolation must settle before
       // the next queued turn can start on a half-switched tree.
-      await this._finalizeExperiment(this._stopRequested ? 'stopped' : 'completed');
+      await this._finalizeExperiment(this._stopRequested || this._turnIncomplete ? 'stopped' : this._turnFailed ? 'error' : 'completed');
+      this._finishMission();
+      await this._validateSkillTrials();
+      // Automatic reflection is decided here (the mission just completed and its
+      // episodes are recorded) but RUN only once the turn has released _busy.
+      if (getConfig().memoryReflection === 'after-mission' && this._mission?.status === 'completed' && this._knowledge) {
+        this._reflectAfterTurn = await this._knowledge.reflectionDue().catch(() => false);
+      }
+      await this._missionWrite;
+      // Mission budget: add this turn's cost to the mission and pause it when a
+      // ceiling is reached — with the reason shown, never as a silent stop.
+      if (this._mission) {
+        const progressed = this._turnChangedFiles.size > 0 || this._turnEvidence.some(e => e.result === 'pass');
+        const m = this._turnMetrics;
+        this._mission = { ...this._mission, usage: accumulateMissionUsage(coerceMissionUsage(this._mission.usage), {
+          toolCalls: m?.toolCalls ?? 0, promptTokens: m?.promptTokens ?? 0, completionTokens: m?.completionTokens ?? 0,
+          durationMs: m ? Date.now() - m.startedAt : 0, progressed,
+        }) };
+        if (this._mission.autonomous && this._mission.status !== 'completed') {
+          const verdict = checkMissionBudget(this._mission.usage!, this._missionBudget());
+          if (!verdict.allowed) {
+            this._mission = setMissionStatus(this._mission, 'paused', `Mission budget reached: ${verdict.reason}`);
+            this._postMessage({ type: 'notice', text: `Mission budget reached — ${verdict.reason}. The mission is paused ` +
+              `(${describeMissionUsage(this._mission.usage!, this._missionBudget())}). Raise codeflare.missionBudget, or start a new task.` });
+            log(`Mission ${this._mission.id} paused by budget: ${verdict.code} — ${verdict.reason}`);
+          }
+        }
+        this._publishMission();
+      }
       // Record this turn's metrics (best-effort; never blocks the next message).
       if (this._turnMetrics) {
         this._turnMetrics.filesChanged = this._turnChangedFiles.size;
@@ -1409,6 +2027,179 @@ export class ChatViewProvider {
       this._busy = false;
       const next = this._queue.shift();
       if (next) { void this._handleUserMessage(next.text, next.images, next.files); }
+      else if (this._reflectAfterTurn) {
+        // Idle now: a queued message takes precedence and the flag simply
+        // survives until the queue drains.
+        this._reflectAfterTurn = false;
+        void this.reflectMemory('auto');
+      }
+    }
+  }
+
+  private _finishMission(): void {
+    if (!this._mission) { return; }
+    const decision = this._lastExperiment?.decision;
+    let status: MissionRecord['status'] = 'completed';
+    let activity = 'Opdracht afgerond';
+    if (this._stopRequested) { status = 'paused'; activity = 'Gestopt; opdracht opgeslagen om te hervatten'; }
+    else if (this._turnFailed) { status = 'failed'; activity = 'Uitvoering mislukt; bekijk de foutmelding'; }
+    else if (this._missionPaused || this._turnIncomplete) { status = 'paused'; activity = 'Opdracht wacht op vervolg of aanvullende informatie'; }
+    else if (this._mission.testStatus === 'failed' || decision === 'REJECTED') { status = 'failed'; activity = 'Controle mislukt; herstel is nog nodig'; }
+    else if (['incomplete', 'running'].includes(this._mission.testStatus) || decision === 'NEEDS_REVIEW') { status = 'paused'; activity = 'Nog onvoldoende bewijs om af te ronden'; }
+    if (this._mission.autoTest && this._mission.testStatus === 'pending') {
+      if (this._mission.changedFiles.length === 0) { this._mission.testStatus = 'skipped'; }
+      else { status = status === 'completed' ? 'paused' : status; activity = 'Testopdracht nog niet afgerond'; }
+    }
+    if (status === 'completed') { this._mission = transitionMission(this._mission, 'deliver', activity); }
+    this._mission = setMissionStatus(this._mission, status, activity);
+    this._publishMission();
+  }
+
+  private async _knowledgeTool(name: string, raw: string): Promise<string> {
+    if (!this._knowledge || !this._mission) { return 'Extension memory storage or an active mission is unavailable.'; }
+    try {
+      const args = JSON.parse(raw || '{}');
+      if (name === 'recall_memory') {
+        const result = await this._knowledge.recall(args);
+        return JSON.stringify({ ...result, results: result.results.map(r => ({ ...r, text: r.text.slice(0, 1500) })) });
+      }
+      if (name === 'record_landscape') {
+        this._missionPhase('design', 'Onderzoekslandschap en acceptatiecriteria vastleggen');
+        return await this._knowledge.recordLandscape(this._mission.id, args);
+      }
+      if (args.scope !== undefined && args.scope !== 'project' && args.scope !== 'global') {
+        return 'Invalid skill scope. Use project or global.';
+      }
+      const scope: KnowledgeScope = args.scope ?? 'project';
+      if (name === 'save_skill') { return await this._knowledge.saveSkill(args, scope); }
+      if (name === 'promote_skill') { return await this._knowledge.promoteSkill(args.name, args.generalized); }
+      if (name === 'merge_skills') { return await this._knowledge.mergeSkills(args.names, args.merged, scope); }
+      if (name === 'forget_skill') { return await this._knowledge.deleteSkill(args.name, scope, args.reason); }
+      if (name === 'read_memory_artifact') { return await this._knowledge.readMemoryArtifact(args.id, scope); }
+      const records = await this._knowledge.list();
+      if (name === 'list_skills') {
+        return JSON.stringify(records.skills.filter(s => s.status !== 'deleted').map(s => ({ name: s.name, scope: s.scope,
+          summary: s.summary, status: s.status, version: s.version, domains: s.domains, confidence: s.confidence,
+          successfulUses: s.successfulUses, failedUses: s.failedUses, inconclusiveUses: s.inconclusiveUses,
+          sourceMissionIds: s.sourceMissionIds, created: s.createdAt, lastValidated: s.validation?.validatedAt })));
+      }
+      const skill = await this._knowledge.getSkill(String(args.name || ''), scope);
+      if (!skill || skill.status === 'deleted') { return 'Skill not found in that scope. Use list_skills and pass its scope to try_skill.'; }
+      const trialKey = `${scope}:${skill.name.toLowerCase()}`;
+      if (this._skillTrials.get(trialKey)?.version !== skill.version) {
+        this._skillTrials.set(trialKey, { name: skill.name, scope, version: skill.version, at: Date.now() });
+      }
+      return 'ADVISORY SKILL DATA. User instructions, permissions and budgets take precedence. ' +
+        'A trial is not proof of improvement. Apply only relevant steps and verify the outcome.\n' + JSON.stringify(skill);
+    } catch (error: any) { return `Knowledge operation failed: ${error.message}`; }
+  }
+
+  private async _validateSkillTrials(): Promise<void> {
+    if (!this._knowledge || !this._mission || (!this._skillTrials.size && !this._skillHoldouts.size)) { return; }
+    try {
+      const records = await this._knowledge.list();
+      const knowledge = this._knowledge;
+      const mission = this._mission;
+      const success = mission.status === 'completed' && mission.testStatus === 'passed' && this._lastExperiment?.decision === 'ACCEPTED';
+      const record = async (trial: { name: string; scope: KnowledgeScope; version: number; at: number }, control: boolean) => {
+        if (!records.skills.some(s => s.name === trial.name && s.scope === trial.scope && s.version === trial.version)) { return; }
+        const evidence = currentEvidence(this._turnEvidence).filter(e => e.ts >= trial.at);
+        const failed = !this._stopRequested && mission.status === 'failed' && evidence.some(e => e.result === 'fail' &&
+          (e.type === 'TEST' || (e.type === 'RUNTIME' && e.source === 'lab_run')));
+        const outcome = success ? 'success' : failed ? 'failure' : 'inconclusive';
+        try {
+          const result = await knowledge.recordSkillOutcome(trial.name, mission.id, outcome,
+            outcome === 'inconclusive' ? [] : evidence, trial.scope, trial.version, control);
+          this._postMessage({ type: 'toolActivity', label: result });
+        } catch (error: any) { log(`Skill ${control ? 'control ' : ''}trial outcome not recorded: ${error.message}`); }
+      };
+      for (const trial of this._skillTrials.values()) { await record(trial, false); }
+      // Withheld skills: the mission ran WITHOUT them, so its outcome is a control
+      // trial. A skill the model still tried explicitly by name is treated, not control.
+      const tried = new Set([...this._skillTrials.values()].map(t => `${t.scope}:${t.name.toLowerCase()}`));
+      for (const [key, holdout] of this._skillHoldouts) { if (!tried.has(key)) { await record(holdout, true); } }
+    } catch (error: any) { log(`Skill validation incomplete: ${error.message}`); }
+  }
+
+  private async _runTestStage(): Promise<void> {
+    if (!this._mission) { return; }
+    const missionId = this._mission.id;
+    const epoch = this._historyEpoch;
+    const stillActive = () => this._mission?.id === missionId && this._historyEpoch === epoch;
+    const config = getConfig();
+    this._missionPhase('verify', 'Aparte testopdracht: tests schrijven en uitvoeren');
+    if (!config.agentEdit || !config.agentRunCommands || !config.agentMode) {
+      this._mission.testStatus = 'incomplete';
+      this._postMessage({ type: 'notice', text: 'De testopdracht vereist agentmodus, bestandstoegang en het uitvoeren van opdrachten.' });
+      return;
+    }
+    this._testStageRunning = true;
+    try {
+      for (let attempt = 0; attempt <= config.diagnosticsMaxRounds && !this._stopRequested; attempt++) {
+        this._mission.testStatus = 'running';
+        this._missionPhase('verify', `Onafhankelijke testopdracht${attempt ? ` — controle na herstel ${attempt}` : ''}`);
+        this._agentOwners.clear();
+        const result = await this._runOneSubagent(
+          testAuthorPrompt(this._mission.task, this._mission.changedFiles), new VLLMClient(), '[Tests]', true);
+        this._agentOwners.clear();
+        if (!stillActive()) { return; }
+        if (this._stopRequested) {
+          if (this._mission) { this._mission.testStatus = 'incomplete'; }
+          break;
+        }
+        const command = result.testCommand?.trim() || '';
+        if (!isTestCommand(command)) {
+          this._mission.testStatus = 'incomplete';
+          this._postMessage({ type: 'notice', text: 'Tests zijn niet uitgevoerd: geen ondersteund testcommando gevonden. ' + result.summary });
+          break;
+        }
+        const budget = gateToolCall();
+        if (!budget.allowed) { this._mission.testStatus = 'incomplete'; break; }
+        this._missionPhase('verify', `Tests uitvoeren: ${command}`);
+        const output = await executeTool('run_command', JSON.stringify({ command }));
+        if (!stillActive()) { return; }
+        if (this._stopRequested) {
+          if (this._mission) { this._mission.testStatus = 'incomplete'; }
+          break;
+        }
+        const verdict = testExecutionVerdict(output);
+        const evidence = makeEvidence('TEST', 'gate:auto-test', `test: ${command} → ${verdict}`,
+          verdict === 'passed' ? 'pass' : verdict === 'failed' ? 'fail' : 'inconclusive', 'post-edit');
+        evidence.checkId = `auto-test:${command}`;
+        this._turnEvidence.push(evidence);
+        this._runLog?.append('gate', { gate: 'auto-test', command, result: verdict, output: output.slice(-12000) });
+        this._mission.testStatus = verdict;
+        this._publishMission();
+        const report = `Independent test task: ${result.summary}\nCommand: ${command}\n${output}`;
+        this._postMessage({ type: 'notice', text: report, level: verdict === 'passed' ? 'success' : 'warning' });
+        this._history.push({ role: 'user', content: report });
+        if (verdict === 'passed') {
+          // A green run does not settle explicitly reported coverage gaps or partial authoring.
+          if (result.status !== 'success' || result.openIssues.length) { this._mission.testStatus = 'incomplete'; }
+          await this._runDiagnosticsRound(new Set(this._mission.changedFiles), config.diagnosticsMaxRounds);
+          if (!stillActive() || this._stopRequested) { return; }
+          await this._runVerifyGate(new Set(this._mission.changedFiles), config.diagnosticsMaxRounds);
+          if (!stillActive() || this._stopRequested) { return; }
+          await this._runDiffReview(config.diagnosticsMaxRounds);
+          break;
+        }
+        if (verdict === 'incomplete' || attempt === config.diagnosticsMaxRounds) { break; }
+        this._testStageRunning = false;
+        this._missionPhase('build', 'Testfout gevonden; implementatie herstellen');
+        const feedback = `The independent test task failed. Fix the implementation against the ORIGINAL REQUEST:\n` +
+          `${this._mission.task}\n\n${report}\nDo not weaken assertions or alter acceptance criteria to pass. ` +
+          'The independent test task will run again after your repair.';
+        this._history.push({ role: 'user', content: feedback });
+        await this._streamResponse(buildSystemPrompt(gatherContext()), feedback, gatherContext(), undefined, config.diagnosticsMaxRounds);
+        this._testStageRunning = true;
+        if (!stillActive()) { return; }
+        if (this._turnFailed || this._turnIncomplete || this._missionPaused || this._stopRequested) {
+          this._mission.testStatus = 'incomplete'; break;
+        }
+      }
+    } finally {
+      this._testStageRunning = false;
+      if (stillActive()) { this._publishMission(); }
     }
   }
 
@@ -1427,7 +2218,7 @@ export class ChatViewProvider {
       exp.endedAt = Date.now();
       exp.outcome = outcome;
       exp.attempts = Math.max(0, (this._turnMetrics?.rounds ?? exp.attempts) - 1);
-      exp.filesChanged = [...this._turnMutatedPaths];
+      exp.filesChanged = [...new Set([...this._turnMutatedPaths, ...this._mission?.changedFiles || []])];
       exp.evidence = this._turnEvidence.slice();
       exp.gates = { ...this._turnGates };
 
@@ -1445,11 +2236,11 @@ export class ChatViewProvider {
             `${s.behavioral} behavioural, ${s.checks} checks${failed ? `, ${failed} failed` : ''}`,
         });
         runLog?.append('decision', { verifyOnly: true, summary: exp.decisionReasons[0] });
-      } else if (this._planAwaitingReview) {
+      } else if (this._planAwaitingReview || this._missionPaused) {
         // A turn that paused for plan review decided nothing — record it as
         // still-executing and skip the decision chip.
         exp.state = 'EXECUTING';
-        runLog?.append('note', { note: 'paused for plan review' });
+        runLog?.append('note', { note: 'paused for user input or plan review' });
       } else {
         const { decision, reasons } = decideAcceptance({
           gates: exp.gates,
@@ -1498,6 +2289,8 @@ export class ChatViewProvider {
       }
 
       this._lastExperiment = exp;
+      if (this._state) { await this._state.update('lastExperiment', exp); }
+      await this._knowledge?.recordExperiment(exp).catch(error => log(`Experiment memory unavailable: ${error.message}`));
       void appendExperiment(exp);
       void runLog?.flush();
     } catch (err: any) {
@@ -1534,7 +2327,9 @@ export class ChatViewProvider {
       `verified here, say why). End with VERIFICATION: SUPPORTED, FAILED, or INCOMPLETE. Never mark ` +
       `✓ without having run the check this turn.`;
     this._postMessage({ type: 'addUserMessage', text: '🔎 Prove It — independently verify the last change' });
-    this._postMessage({ type: 'toolActivity', label: 'PROVE IT: write tools disabled — gathering evidence' });
+    const proveJudge = this._judge();
+    this._postMessage({ type: 'toolActivity', label: 'PROVE IT: write tools disabled — gathering evidence' +
+      (proveJudge.independent ? ` (independent judge ${proveJudge.label})` : '') });
     this._verifyOnlyTurn = true;
     setToolWriteLock(true);
     try {
@@ -1576,7 +2371,9 @@ export class ChatViewProvider {
       `End with: counterexamples found (n) / solution survived all executed scenarios. Do not soften ` +
       `findings; a found counterexample is the SUCCESSFUL outcome of this exercise.`;
     this._postMessage({ type: 'addUserMessage', text: '🔨 Break My Solution — adversarial pass on the last change' });
-    this._postMessage({ type: 'toolActivity', label: 'BREAK MY SOLUTION: write tools disabled — attacking' });
+    const breakJudge = this._judge();
+    this._postMessage({ type: 'toolActivity', label: 'BREAK MY SOLUTION: write tools disabled — attacking' +
+      (breakJudge.independent ? ` (independent judge ${breakJudge.label})` : '') });
     this._verifyOnlyTurn = true;
     setToolWriteLock(true);
     try {
@@ -1676,6 +2473,7 @@ export class ChatViewProvider {
 
   private async _streamResponse(systemPrompt: string, userMessage: string, context?: import('../editor/contextGatherer').EditorContext, images?: string[], round: number = 0): Promise<void> {
     const config = getConfig();
+    if (round > 0) { this._missionPhase('build', `Herstellen: ${userMessage.split('\n')[0].slice(0, 160)}`); }
     if (this._turnMetrics) { this._turnMetrics.rounds++; }
     // Snapshot the history epoch: if the user clears the chat while this turn
     // runs, the epoch bumps and every history write below is skipped, so the
@@ -1816,7 +2614,9 @@ export class ChatViewProvider {
         let stepText = '';
         let lastProgress = 0;
         let lastProgressLog = 0;
-        const result = await this._client.streamChat(messages, {
+        // Verify-only turns (Prove It / Break My Solution) run on the judge when
+        // one is configured: the model that did the work must not grade it.
+        const result = await (this._verifyOnlyTurn ? this._judge().client : this._client).streamChat(messages, {
           onToken: (token) => {
             fullResponse += token;
             stepText += token;
@@ -1848,6 +2648,7 @@ export class ChatViewProvider {
           onDone: () => { /* per-step end handled below */ },
           onError: (error) => {
             hadError = true;
+            this._turnFailed = true;
             this._postMessage({ type: 'streamError', error });
             log(`Stream error: ${error}`);
           },
@@ -2064,6 +2865,7 @@ export class ChatViewProvider {
         // Execute each tool and feed the result back to the model.
         for (const call of result.toolCalls) {
           const label = describeToolCall(call.function.name, call.function.arguments);
+          this._missionTool(call.function.name, call.function.arguments);
           this._postMessage({
             type: 'toolActivity', label,
             copy: copyableCommand(call.function.name, call.function.arguments),
@@ -2106,6 +2908,9 @@ export class ChatViewProvider {
             } catch { /* ignore */ }
           } else if (call.function.name === 'update_todos') {
             output = this._handleUpdateTodos(call.function.arguments);
+          } else if (['record_landscape', 'save_skill', 'list_skills', 'try_skill', 'recall_memory',
+            'promote_skill', 'merge_skills', 'forget_skill', 'read_memory_artifact'].includes(call.function.name)) {
+            output = await this._knowledgeTool(call.function.name, call.function.arguments);
           } else if (call.function.name === 'run_subagent') {
             output = await this._runSubagent(call.function.arguments);
           } else if (call.function.name === 'run_subagents') {
@@ -2238,6 +3043,7 @@ export class ChatViewProvider {
         // The change budget tripped: stop the turn NOW, visibly. This is a
         // policy stop, not a failure of the model.
         if (budgetStop) {
+          this._turnIncomplete = true;
           this._postMessage({
             type: 'toolActivity',
             label: `⛔ CHANGE_BUDGET_EXCEEDED — ${budgetStop}`,
@@ -2285,6 +3091,7 @@ export class ChatViewProvider {
       // quiet when the user pressed Stop.
       if (!fullResponse && !pausedForPlan && !this._stopRequested &&
           turnMessages.some(m => m.role === 'tool')) {
+        this._turnIncomplete = true;
         fullResponse = stepsUsed >= budget
           ? `_(Reached the ${stepsUsed}-step limit without finishing. The budget only auto-extends while new files are being written — say "continue" to resume, or increase \`codeflare.agentMaxSteps\`.)_`
           : `_(The model stopped after ${stepsUsed} step(s) without a final summary — the task may be incomplete. Say "continue" to let it pick up where it left off.)_`;
@@ -2313,6 +3120,7 @@ export class ChatViewProvider {
       // the plan-review pause (an empty answer there is expected).
       if (!finalResponse && turnMessages.length === 0 && !pausedForPlan &&
           !this._stopRequested && !hadError) {
+        this._turnIncomplete = true;
         // Empty completions usually mean the inference SERVER is degraded, not
         // the prompt (confirmed: instant 0-char answers, fixed by a server
         // restart). Probe it live so the advice matches the actual cause.
@@ -2353,6 +3161,7 @@ export class ChatViewProvider {
 
       // Paused for plan review: show the approval bar and end the turn here.
       if (pausedForPlan) {
+        this._missionPaused = true;
         // The user is being asked to approve a plan — a routine gate, not a
         // sign the agent went wrong (kept apart from 'correction').
         if (this._turnMetrics) { this._turnMetrics.interventions.approval++; }
@@ -2364,9 +3173,10 @@ export class ChatViewProvider {
       // Clarification: the agent finished a turn without acting (no tool calls,
       // no files changed) and ended by asking the user a question — it needed
       // information rather than being corrected. Heuristic, main frame only.
-      if (round === 0 && this._turnMetrics && this._turnChangedFiles.size === 0 &&
-          this._turnMetrics.toolCalls === 0 && /\?\s*$/.test(finalResponse.trim())) {
-        this._turnMetrics.interventions.clarification++;
+      if (round === 0 && this._turnChangedFiles.size === 0 &&
+          !turnMessages.some(message => message.role === 'tool') && /\?\s*$/.test(finalResponse.trim())) {
+        this._missionPaused = true;
+        if (this._turnMetrics) { this._turnMetrics.interventions.clarification++; }
       }
 
       // Preview any image files the turn produced (written by tools, generated
@@ -2399,6 +3209,7 @@ export class ChatViewProvider {
         // Include files changed via apply_patch/rename/delete (tracked by the
         // checkpoint recorder), not just the create/edit/move paths this round.
         const changed = new Set<string>([...writtenPaths, ...this._turnMutatedPaths]);
+        if (changed.size) { this._missionPhase('verify', 'Wijzigingen controleren tegen project en opdracht'); }
         const diagRan = await this._runDiagnosticsRound(changed, round);
         let verifyRan = false;
         if (!diagRan && !this._stopRequested) {
@@ -2419,6 +3230,7 @@ export class ChatViewProvider {
       // Keep any tool exchanges already made this turn (files are on disk); a
       // later "continue" must see them so it doesn't re-run the same edits.
       persistTurnMessages();
+      this._turnFailed = true;
       this._postMessage({ type: 'streamError', error: err.message });
       log(`Unexpected error: ${err.message}`);
     } finally {
@@ -2686,14 +3498,17 @@ export class ChatViewProvider {
 
   /** Record a behaviourally-relevant tool action for the requirement review's evidence. */
   private _recordEvidence(name: string, rawArgs: string, output: string): void {
-    if (this._turnEvidence.length >= 40) { return; }
     // Phase = ORDER relative to the first file change this turn, so an ordering
     // requirement ("reproduce BEFORE the fix") can be checked: an action logged
     // while nothing was edited yet is pre-edit, otherwise post-edit.
     const phase = this._turnMutatedPaths.size === 0 ? 'pre-edit' as const : 'post-edit' as const;
     const item = classifyToolEvidence(name, rawArgs, output, phase);
     if (!item) { return; }          // reads/edits aren't behavioural evidence (the diff covers edits)
+    if (['run_command', 'verify_visual', 'lab_diff_test', 'lab_run'].includes(name)) {
+      item.checkId = `${name}:${rawArgs}`;
+    }
     this._turnEvidence.push(item);
+    if (this._turnEvidence.length > 500) { this._turnEvidence = currentEvidence(this._turnEvidence); }
     this._runLog?.append('evidence', {
       type: item.type, result: item.result, phase: item.phase,
       description: item.description.slice(0, 200),
@@ -2777,13 +3592,19 @@ export class ChatViewProvider {
     // model's say-so — a "verify the behaviour" requirement can only be MET if
     // the evidence shows a real run/test/screenshot exercised it.
     const evidence = this._turnEvidence.length
-      ? this._turnEvidence.map(e => `- ${renderEvidenceLine(e)}`).join('\n')
+      ? currentEvidence(this._turnEvidence).map(e => `- ${renderEvidenceLine(e)}`).join('\n')
       : '(no commands, tests, or visual checks were run this turn — only file edits and/or diagnostics)';
     const behavioralActions = this._turnEvidence.filter(isBehavioral).length;
 
-    this._postMessage({ type: 'toolActivity', label: 'reviewing against requirements…' });
+    const judge = this._judge();
+    this._postMessage({ type: 'toolActivity', label: judge.independent
+      ? `reviewing against requirements — independent judge ${judge.label}…`
+      : 'reviewing against requirements…' });
     const system =
-      'You are verifying YOUR OWN change against the user\'s request BEFORE declaring the task done. ' +
+      (judge.independent
+        ? 'You are an INDEPENDENT reviewer. Another agent made a change for the user; you did not write it ' +
+          'and owe it no benefit of the doubt. Verify it against the user\'s request BEFORE it is declared done. '
+        : 'You are verifying YOUR OWN change against the user\'s request BEFORE declaring the task done. ') +
       'Diagnostics and the build/verify step already passed — do NOT re-check syntax or compilation. ' +
       'This is REQUIREMENT verification, which is SEPARATE from code verification: for EACH distinct ' +
       'requirement the user stated, decide whether it is satisfied by EVIDENCE — the diff AND the list ' +
@@ -2817,12 +3638,13 @@ export class ChatViewProvider {
 
     let verdict = '';
     try {
-      verdict = await this._client.complete(
+      verdict = await judge.client.complete(
         [{ role: 'system', content: system }, { role: 'user', content: user }], 1000);
     } catch (err: any) {
-      log(`Requirement review call failed: ${err.message}`);
+      log(`Requirement review call failed${judge.independent ? ` (judge ${judge.label})` : ''}: ${err.message}`);
       return false;
     }
+    if (judge.independent && this._turnMetrics) { this._turnMetrics.judgeModel = judge.label; }
     const clean = verdict.trim();
     // Unmet = any requirement row not tagged [MET].
     const unmet = (clean.match(/^\s*[-*]\s*\[\s*(?:partial|not[\s-]?met|unverified|uncertain)\s*\][^\n]*/gim) || [])
@@ -2832,10 +3654,15 @@ export class ChatViewProvider {
     // verify_visual — only edits/diagnostics). That is UNVERIFIED no matter what
     // the model claimed, so it can never rubber-stamp "verify it works" with just
     // a get_diagnostics call.
-    if (this._requestWantsBehaviorVerification() && behavioralActions === 0 &&
-        !unmet.some(u => /unverified/i.test(u))) {
+    // Calibration extends this: a model whose measured record is "done without
+    // a demonstrating check" gets the same backstop on EVERY turn, not only
+    // when the user spelled out that behaviour must be verified.
+    const behaviourRequired = this._requestWantsBehaviorVerification() || !!this._calibration?.requireBehavioralEvidence;
+    if (behaviourRequired && behavioralActions === 0 && !unmet.some(u => /unverified/i.test(u))) {
       unmet.push('[UNVERIFIED] Verify the ACTUAL behaviour — no run/test/screenshot exercised the ' +
-        'change this turn (only edits/diagnostics). Actually run it and confirm the result.');
+        'change this turn (only edits/diagnostics). Actually run it and confirm the result.' +
+        (this._calibration?.requireBehavioralEvidence && !this._requestWantsBehaviorVerification()
+          ? ' (Required by calibration: this model\'s recent turns reported done without a demonstrating check.)' : ''));
     }
     // Ordering backstop: the request asked to REPRODUCE the bug before fixing,
     // but no run/test ran BEFORE the first edit (every behavioural action is
@@ -2915,10 +3742,7 @@ export class ChatViewProvider {
   private async _runDiagnosticsRound(writtenPaths: Set<string>, round: number): Promise<boolean> {
     const config = getConfig();
     if (!config.diagnosticsLoop || writtenPaths.size === 0) { return false; }
-    if (round >= config.diagnosticsMaxRounds) {
-      log(`Diagnostics loop: reached max ${config.diagnosticsMaxRounds} round(s)`);
-      return false;
-    }
+    const terminal = round >= config.diagnosticsMaxRounds;
 
     // Only wait on diagnostics for files a language server actually analyzes —
     // skip images/assets/plain files so a fresh directory doesn't stall ~2s.
@@ -2948,6 +3772,7 @@ export class ChatViewProvider {
     this._turnEvidence.push(makeEvidence('DIAGNOSTIC', 'gate:diagnostics',
       `diagnostics gate → ${report.errorCount} new error(s)`, 'fail', 'post-edit'));
     this._runLog?.append('gate', { gate: 'diagnostics', result: 'failed', errors: report.errorCount });
+    if (terminal) { return false; }
 
     this._postMessage({
       type: 'toolActivity',
@@ -3095,10 +3920,7 @@ export class ChatViewProvider {
   private async _runVerifyGate(writtenPaths: Set<string>, round: number): Promise<boolean> {
     const config = getConfig();
     if (!config.verifyGate || !config.agentRunCommands || writtenPaths.size === 0) { return false; }
-    if (round >= config.diagnosticsMaxRounds) {
-      log(`Verify gate: reached max ${config.diagnosticsMaxRounds} round(s)`);
-      return false;
-    }
+    const terminal = round >= config.diagnosticsMaxRounds;
 
     // Precedence: the codeflare.verifyCommand setting > the project's
     // .codeflare/verification.json > the cheapest sound check for EACH detected
@@ -3174,7 +3996,7 @@ export class ChatViewProvider {
     }
     this._turnGates.verify = 'failed';
     this._runLog?.append('gate', { gate: 'verify', result: 'failed', failures: failures.length });
-    if (this._stopRequested) { return false; }
+    if (this._stopRequested || terminal) { return false; }
 
     this._postMessage({ type: 'toolActivity', label: `verification failed (${failures.length}) — fixing` });
     log(`Verify gate: ${failures.length} step(s) FAILED → fix round ${round + 1}`);
@@ -3491,6 +4313,33 @@ export class ChatViewProvider {
             <textarea id="cfg-trusted" rows="8" placeholder="mkdir&#10;ls&#10;git status"></textarea>
           </label>
           <div class="config-hint">A command runs without a prompt if it equals or starts with one of these. Keep this list to safe, non-destructive commands.</div>
+        </div>
+
+        <div class="config-pane hidden" data-pane="memory">
+          <div class="config-hint" id="cfg-memory-status">Loading memory status…</div>
+          <div class="config-field">
+            <span>Learn from experience</span>
+            <div class="config-buttons neutral">
+              <button id="cfg-reflect">Reflect on recorded experiments</button>
+            </div>
+          </div>
+          <div class="config-hint">
+            Reads the recorded experiments and proposes <strong>candidate</strong> skills and constraints, and
+            points out contradictions between stored skills. Nothing is validated by reflection itself.
+          </div>
+          <div class="config-field">
+            <span>Erase stored memory</span>
+            <div class="config-buttons">
+              <button id="cfg-clear-project" class="danger">Clear this project</button>
+              <button id="cfg-clear-global" class="danger">Clear agent memory</button>
+              <button id="cfg-clear-all" class="danger">Clear everything</button>
+            </div>
+          </div>
+          <div class="config-hint">
+            <strong>This project</strong> removes the facts, skills and recorded experiments learned in this
+            workspace. <strong>Agent memory</strong> removes the reusable skills shared across every project.
+            Each button asks for confirmation first, and cannot be undone.
+          </div>
         </div>
 
         <div class="config-actions">

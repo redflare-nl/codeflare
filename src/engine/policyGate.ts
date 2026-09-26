@@ -12,22 +12,34 @@ import {
   AutonomyProfile,
   BUDGET_PROFILES,
   ChangeBudget,
+  GUARDRAIL_PATHS,
   PathPolicy,
   PolicyVerdict,
   TurnTotals,
   checkBudget,
   checkCommand,
+  checkGuardrailCommand,
   checkPath,
   checkToolCall,
   newTurnTotals,
   noteMutation,
 } from './policy';
+import { checkAgentMutation } from './agentScope';
+
+/**
+ * How the runtime's own guardrail files are treated this turn.
+ *  - 'forbid'  — self-improvement: unwritable via file tools AND run_command.
+ *  - 'protect' — any turn inside the CodeFlare repository: blocked in autonomous
+ *                profiles, ordinary confirm flow when a human is watching.
+ */
+export type GuardrailMode = 'forbid' | 'protect';
 
 interface ActiveGate {
   profile: AutonomyProfile;
   budget: ChangeBudget;
   paths: PathPolicy;
   totals: TurnTotals;
+  guardrails?: GuardrailMode;
   /** Set once a budget verdict failed — everything after is refused fast. */
   tripped?: PolicyVerdict;
 }
@@ -39,15 +51,30 @@ export interface PolicyTurnConfig {
   paths: PathPolicy;
   /** Optional per-field overrides on the profile's budget (0 = unlimited). */
   budgetOverrides?: Partial<ChangeBudget>;
+  guardrails?: GuardrailMode;
 }
 
 export function beginPolicyTurn(cfg: PolicyTurnConfig): void {
+  // Guardrails are added to the path policy itself, so every existing check
+  // (gateMutation, previewMutation, apply_patch preflight) covers them with no
+  // new code path to forget.
+  const paths: PathPolicy = cfg.guardrails === 'forbid'
+    ? { ...cfg.paths, forbiddenPaths: [...cfg.paths.forbiddenPaths, ...GUARDRAIL_PATHS] }
+    : cfg.guardrails === 'protect'
+      ? { ...cfg.paths, protectedPaths: [...cfg.paths.protectedPaths, ...GUARDRAIL_PATHS] }
+      : cfg.paths;
   gate = {
     profile: cfg.profile,
     budget: { ...BUDGET_PROFILES[cfg.profile], ...(cfg.budgetOverrides || {}) },
-    paths: cfg.paths,
+    paths,
     totals: newTurnTotals(),
+    guardrails: cfg.guardrails,
   };
+}
+
+/** The guardrail mode of the active turn, if any (for labels and logs). */
+export function activeGuardrails(): GuardrailMode | undefined {
+  return gate?.guardrails;
 }
 
 export function endPolicyTurn(): void {
@@ -70,6 +97,9 @@ export function gateMutation(
   relPath: string,
   delta: { isNew?: boolean; addedLines?: number; deletedLines?: number } = {}
 ): PolicyVerdict {
+  const ownership = checkAgentMutation(relPath, false);
+  if (!ownership.allowed) { return ownership; }
+  if (!gate) { return checkAgentMutation(relPath, true); }
   if (!gate || !relPath) { return OK; }
   if (gate.tripped) { return gate.tripped; }
   const pathVerdict = checkPath(relPath, gate.paths, gate.profile);
@@ -80,6 +110,7 @@ export function gateMutation(
     return budgetVerdict;
   }
   noteMutation(gate.totals, relPath, delta);
+  checkAgentMutation(relPath, true);
   return OK;
 }
 
@@ -92,6 +123,8 @@ export function previewMutation(
   relPath: string,
   delta: { isNew?: boolean; addedLines?: number; deletedLines?: number } = {}
 ): PolicyVerdict {
+  const ownership = checkAgentMutation(relPath, false);
+  if (!ownership.allowed) { return ownership; }
   if (!gate || !relPath) { return OK; }
   if (gate.tripped) { return gate.tripped; }
   const pathVerdict = checkPath(relPath, gate.paths, gate.profile);
@@ -111,6 +144,12 @@ export function gateToolCall(): PolicyVerdict {
 /** Gate a shell command (autonomous profiles refuse publish/deploy/push/installs). */
 export function gateCommand(command: string): PolicyVerdict {
   if (!gate) { return OK; }
+  // Locked guardrails: the shell must not become the way around the file gate
+  // (echo > policy.ts, git apply, or committing an edit so it looks like baseline).
+  if (gate.guardrails === 'forbid') {
+    const v = checkGuardrailCommand(command);
+    if (!v.allowed) { return v; }
+  }
   return checkCommand(command, gate.profile);
 }
 
