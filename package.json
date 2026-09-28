@@ -32,6 +32,11 @@
   "contributes": {
     "commands": [
       {
+        "command": "codeflare.openSettings",
+        "title": "CodeFlare: Open Settings",
+        "icon": "$(gear)"
+      },
+      {
         "command": "codeflare.openChat",
         "title": "CodeFlare: Open Chat",
         "icon": {
@@ -145,6 +150,11 @@
         {
           "command": "codeflare.openChat",
           "group": "navigation"
+        },
+        {
+          "command": "codeflare.openSettings",
+          "group": "navigation",
+          "when": "activeWebviewPanelId == 'codeflare.chatPanel'"
         }
       ],
       "editor/context": [
