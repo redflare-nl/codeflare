@@ -493,6 +493,8 @@ export class ChatViewProvider {
 
   private _judgeClient?: VLLMClient;
   private _judgeKey = '';
+  /** Set by openSettings() while a new webview loads; its first getConfig opens the dialog. */
+  private _openSettingsOnLoad = false;
 
   /**
    * The model that reviews work: an independent one when codeflare.judge*
@@ -1181,6 +1183,19 @@ export class ChatViewProvider {
   /**
    * Ensure the panel is open (for commands that need to send to it).
    */
+  /** Open the chat panel (if needed) with its settings dialog showing. */
+  openSettings(): void {
+    if (this._panel) {
+      this._panel.reveal(undefined, false);
+      this._postMessage({ type: 'openSettings' });
+      return;
+    }
+    // A fresh webview can't receive messages yet; it asks for its config once
+    // loaded, and that request opens the dialog.
+    this._openSettingsOnLoad = true;
+    this.togglePanel();
+  }
+
   ensurePanel(): void {
     if (!this._panel) {
       this.togglePanel();
@@ -1269,6 +1284,10 @@ export class ChatViewProvider {
         case 'getConfig':
           this._sendConfigState();
           this._sendMemoryState();
+          if (this._openSettingsOnLoad) {
+            this._openSettingsOnLoad = false;
+            this._postMessage({ type: 'openSettings' });
+          }
           break;
         case 'saveConfig':
           await this._handleSaveConfig(msg.config);
@@ -4244,7 +4263,19 @@ export class ChatViewProvider {
 </head>
 <body>
   <div id="chat-container">
-    <div id="messages"></div>
+    <header id="top-bar">
+      <span class="top-brand">CodeFlare</span>
+      <button id="model-chip" type="button" title="Model and connection — click to change"></button>
+      <span class="top-spacer"></span>
+      <button id="plan-toggle-btn" type="button" title="Show or hide the plan column" hidden>&#9776; Plan</button>
+      <button id="config-btn" type="button" title="Settings: provider, model, token, commands, agents, memory">
+        <span class="gear" aria-hidden="true">&#9881;</span><span class="label">Settings</span>
+      </button>
+    </header>
+    <div id="main-row">
+      <div id="messages"></div>
+      <aside id="plan-column" hidden aria-label="Plan"></aside>
+    </div>
     <div id="input-area">
       <div id="attachments"></div>
       <div class="input-row">
@@ -4270,7 +4301,6 @@ export class ChatViewProvider {
         <span id="ctx-bar"><span id="ctx-fill"></span></span>
         <span id="ctx-label"></span>
       </span>
-      <button id="config-btn" title="Configure endpoint & token">&#9881;</button>
       <span id="version-label">v${this._version}</span>
     </div>
 

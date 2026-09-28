@@ -538,10 +538,24 @@
     scrollToBottom();
   }
 
-  // ── Todo / plan panel ───────────────────────────────
+  // ── Plan column ─────────────────────────────────
+  // The plan lives in its own column to the right of the transcript (stacked
+  // above it in narrow panels) with its own scroll, so reading the chat never
+  // fights an overlay. `todoEl` is the column while a plan is shown.
+  const planColumn = document.getElementById('plan-column');
+  const planToggleBtn = document.getElementById('plan-toggle-btn');
   let todoEl = null;
-  let todoCollapsed = false;
   let lastTodos = [];
+  let planHideTimer = null;
+  let planReviewPending = false;
+  // Remembered per panel: a collapsed plan stays collapsed across reloads.
+  let todoCollapsed = !!(vscode.getState() || {}).planCollapsed;
+
+  function setPlanCollapsed(value) {
+    todoCollapsed = value;
+    try { vscode.setState({ ...(vscode.getState() || {}), planCollapsed: value }); } catch { /* best-effort */ }
+    renderTodos(lastTodos);
+  }
 
   function countLeaves(todos) {
     let total = 0, done = 0;
@@ -557,99 +571,164 @@
     return { total, done };
   }
 
-  function renderTodoItems(todos, depth) {
+  const TODO_STATUS_LABEL = { completed: 'Klaar', in_progress: 'Bezig', pending: 'Te doen' };
+
+  // Plan order is kept stable (steps don't jump around as they finish); the
+  // active step is highlighted and scrolled into view instead.
+  function renderTodoItems(todos, depth, prefix) {
     let html = '';
-    // Tidy display: unfinished items first (in plan order), completed at the
-    // bottom — so the list doesn't look scrambled as files finish out of order.
-    const ordered = [
-      ...todos.filter(t => t.status !== 'completed'),
-      ...todos.filter(t => t.status === 'completed'),
-    ];
-    for (const t of ordered) {
-      const icon = t.status === 'completed' ? '&#10003;'
-        : t.status === 'in_progress' ? '&#9654;' : '&#9675;';
-      html += `<div class="todo-item status-${t.status}" style="padding-left:${depth * 16}px">` +
-        `<span class="todo-check">${icon}</span>` +
-        `<span class="todo-text">${escapeHtml(t.content)}</span></div>`;
+    todos.forEach((t, i) => {
+      const status = TODO_STATUS_LABEL[t.status] ? t.status : 'pending';
+      const num = prefix ? `${prefix}.${i + 1}` : `${i + 1}`;
+      const icon = status === 'completed' ? '&#10003;' : '';
+      const hasSub = t.subtasks && t.subtasks.length ? ' has-sub' : '';
+      html += `<li class="todo-item status-${status}${depth ? ' sub' : ''}${hasSub}" title="${TODO_STATUS_LABEL[status]}">` +
+        `<span class="todo-check" aria-hidden="true">${icon}</span>` +
+        `<span class="todo-num">${num}</span>` +
+        `<span class="todo-text">${escapeHtml(t.content)}</span></li>`;
       if (t.subtasks && t.subtasks.length) {
-        html += renderTodoItems(t.subtasks, depth + 1);
+        html += `<li class="todo-sublist"><ol>${renderTodoItems(t.subtasks, depth + 1, num)}</ol></li>`;
       }
-    }
+    });
     return html;
+  }
+
+  /** Plain-text plan for copy/export — from the data, not the column's buttons. */
+  function planText(todos, prefix) {
+    const mark = { completed: '[x]', in_progress: '[>]' };
+    const lines = [];
+    todos.forEach((t, i) => {
+      const num = prefix ? `${prefix}.${i + 1}` : `${i + 1}`;
+      lines.push(`${'  '.repeat(num.split('.').length - 1)}${mark[t.status] || '[ ]'} ${num}. ${t.content}`);
+      if (t.subtasks && t.subtasks.length) lines.push(...planText(t.subtasks, num));
+    });
+    return lines;
+  }
+
+  function findCurrent(todos) {
+    for (const t of todos) {
+      if (t.subtasks && t.subtasks.length) {
+        const sub = findCurrent(t.subtasks);
+        if (sub) return sub;
+      }
+      if (t.status === 'in_progress') return t;
+    }
+    return null;
+  }
+
+  function hidePlan() {
+    planColumn.hidden = true;
+    planColumn.innerHTML = '';
+    planToggleBtn.hidden = true;
+    todoEl = null;
+    if (planHideTimer) { clearTimeout(planHideTimer); planHideTimer = null; }
   }
 
   function renderTodos(todos) {
     lastTodos = todos || [];
-    if (!todos || todos.length === 0) {
-      if (todoEl) { todoEl.remove(); todoEl = null; }
-      return;
-    }
-    // Floating overlay pinned to the top-right of the plugin window: the chat
-    // scrolls underneath it, it never moves, and it never yanks the scroll.
-    if (!todoEl || !todoEl.isConnected) {
-      todoEl = document.createElement('div');
-      todoEl.className = 'todo-panel';
-      document.body.appendChild(todoEl);
-    }
+    if (!todos || todos.length === 0) { hidePlan(); return; }
+    todoEl = planColumn;
+    planColumn.hidden = false;
+    planToggleBtn.hidden = false;
+    planToggleBtn.classList.toggle('active', !todoCollapsed);
+
     const { total, done } = countLeaves(todos);
     const pct = total ? Math.round((done / total) * 100) : 0;
-    // A finished plan shows its 100% state briefly, then fades away — done is
-    // done, the pill shouldn't keep occupying the corner.
     const finished = total > 0 && done === total;
-    todoEl.classList.toggle('done', finished);
-    if (finished && !todoEl._hideTimer) {
-      const el = todoEl;
-      el._hideTimer = setTimeout(() => {
-        el.remove();
-        if (todoEl === el) { todoEl = null; }
-      }, 5000);
-    } else if (!finished && todoEl._hideTimer) {
-      clearTimeout(todoEl._hideTimer);
-      todoEl._hideTimer = null;
+    const current = findCurrent(todos);
+
+    // A finished plan shows its done state for a while, then steps aside —
+    // unless a plan review is waiting on the user.
+    if (finished && !planHideTimer && !planReviewPending) {
+      planHideTimer = setTimeout(() => { planHideTimer = null; hidePlan(); }, 8000);
+    } else if (!finished && planHideTimer) {
+      clearTimeout(planHideTimer);
+      planHideTimer = null;
     }
-    todoEl.classList.toggle('collapsed', todoCollapsed);
-    todoEl.innerHTML =
-      `<div class="todo-progress"><div class="todo-progress-fill" style="width:${pct}%"></div></div>` +
-      `<div class="todo-title"><span class="todo-caret">${todoCollapsed ? '&#9654;' : '&#9660;'}</span>` +
-      ` Plan &middot; ${done}/${total}</div>` +
-      `<div class="todo-items">${renderTodoItems(todos, 0)}</div>`;
-    todoEl.querySelector('.todo-title').addEventListener('click', () => {
-      todoCollapsed = !todoCollapsed;
-      renderTodos(lastTodos);
-    });
+
+    const prevScroll = planColumn.querySelector('.todo-items')?.scrollTop || 0;
+    planColumn.classList.toggle('collapsed', todoCollapsed);
+    planColumn.classList.toggle('done', finished);
+    planColumn.innerHTML =
+      `<div class="plan-head">` +
+        `<button class="plan-collapse" type="button" title="${todoCollapsed ? 'Plan uitklappen' : 'Plan inklappen'}" ` +
+          `aria-expanded="${!todoCollapsed}">${todoCollapsed ? '&#9664;' : '&#9654;'}</button>` +
+        `<span class="plan-title">Plan</span>` +
+        `<span class="plan-count">${done}/${total}</span>` +
+        `<button class="plan-close" type="button" title="Plan verbergen (komt terug bij de volgende update)">&times;</button>` +
+      `</div>` +
+      `<div class="todo-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}">` +
+        `<div class="todo-progress-fill" style="width:${pct}%"></div></div>` +
+      `<div class="plan-summary">` +
+        (finished ? `<span class="plan-done-badge">&#10003; Plan afgerond</span>`
+          : current ? `<span class="plan-now-label">Nu</span> <span class="plan-now">${escapeHtml(current.content)}</span>`
+          : `<span class="plan-now-label">${pct}% klaar</span>`) +
+      `</div>` +
+      `<ol class="todo-items">${renderTodoItems(todos, 0, '')}</ol>` +
+      (planReviewPending
+        ? `<div class="plan-foot"><div class="plan-foot-hint">Opmerkingen? Typ ze in de chat.</div>` +
+          `<button class="plan-approve" type="button">&#9654; Voer plan uit</button></div>`
+        : '');
+
+    planColumn.querySelector('.plan-collapse').addEventListener('click', () => setPlanCollapsed(!todoCollapsed));
+    planColumn.querySelector('.plan-close').addEventListener('click', hidePlan);
+    const approve = planColumn.querySelector('.plan-approve');
+    if (approve) approve.addEventListener('click', approvePlan);
+
+    const list = planColumn.querySelector('.todo-items');
+    list.scrollTop = prevScroll;
+    const active = list.querySelector('.status-in_progress');
+    if (active && !todoCollapsed) active.scrollIntoView({ block: 'nearest' });
   }
+
+  planToggleBtn.addEventListener('click', () => {
+    if (planColumn.hidden && lastTodos.length) { renderTodos(lastTodos); return; }
+    setPlanCollapsed(!todoCollapsed);
+  });
 
   // ── Plan review (approve or give remarks before execution) ──
   let planReviewEl = null;
 
   function removePlanReview() {
     if (planReviewEl) { planReviewEl.remove(); planReviewEl = null; }
+    if (planReviewPending) {
+      planReviewPending = false;
+      if (todoEl) renderTodos(lastTodos);
+    }
+  }
+
+  function approvePlan() {
+    removePlanReview();
+    const text = 'Plan approved — execute it now, step by step, until every item is completed.';
+    addMessage('user', text);
+    vscode.postMessage({ type: 'sendMessage', text });
   }
 
   function showPlanReview() {
     removePlanReview();
+    planReviewPending = true;
+    if (lastTodos.length) {
+      if (todoCollapsed) setPlanCollapsed(false); else renderTodos(lastTodos);
+    }
     planReviewEl = document.createElement('div');
     planReviewEl.className = 'plan-review';
     planReviewEl.innerHTML =
-      `<span class="plan-review-text">Plan klaar — opmerkingen of aanpassingen? Typ ze hieronder, of start direct.</span>` +
+      `<span class="plan-review-icon" aria-hidden="true">&#128203;</span>` +
+      `<span class="plan-review-text"><strong>Plan klaar.</strong> Opmerkingen of aanpassingen? ` +
+      `Typ ze hieronder, of start direct.</span>` +
       `<button id="plan-approve-btn">&#9654; Voer plan uit</button>`;
     messagesEl.appendChild(planReviewEl);
     scrollToBottom();
-    planReviewEl.querySelector('#plan-approve-btn').addEventListener('click', () => {
-      removePlanReview();
-      const text = 'Plan approved — execute it now, step by step, until every item is completed.';
-      addMessage('user', text);
-      vscode.postMessage({ type: 'sendMessage', text });
-    });
+    planReviewEl.querySelector('#plan-approve-btn').addEventListener('click', approvePlan);
   }
 
   // Re-render a persisted conversation when the panel reopens.
   function renderTranscript(entries) {
     if (!entries || entries.length === 0) return; // keep the welcome screen
     messagesEl.innerHTML = '';
-    // The panel floats on document.body, so a chat wipe doesn't detach it —
-    // remove it explicitly; the persisted todos re-render it right after.
-    if (todoEl) { todoEl.remove(); todoEl = null; }
+    // The plan column is outside the messages list, so a chat wipe doesn't
+    // clear it — hide it explicitly; the persisted todos re-render it right after.
+    hidePlan();
     for (const e of entries) {
       if (e.text) {
         const bubble = addMessage(e.role, e.text);
@@ -1311,10 +1390,10 @@
 
   function serializeChat() {
     const lines = [];
-    // The plan panel floats outside the messages list — include it first.
-    if (todoEl && todoEl.isConnected) {
+    // The plan column sits outside the messages list — include it first.
+    if (todoEl && lastTodos.length) {
       lines.push('[PLAN]');
-      lines.push(todoEl.innerText.trim());
+      lines.push(...planText(lastTodos, ''));
     }
     for (const el of messagesEl.children) {
       if (el.classList.contains('bubble')) {
@@ -1349,8 +1428,8 @@
   // ── Export chat as markdown (images embedded as data URIs) ─────────
   function serializeChatMarkdown() {
     const lines = ['# CodeFlare Chat', ''];
-    if (todoEl && todoEl.isConnected) {
-      lines.push('## Plan', '', '```', todoEl.innerText.trim(), '```', '');
+    if (todoEl && lastTodos.length) {
+      lines.push('## Plan', '', '```', ...planText(lastTodos, ''), '```', '');
     }
     for (const el of messagesEl.children) {
       if (el.classList.contains('bubble')) {
@@ -1550,6 +1629,22 @@
   }
 
   configBtn.addEventListener('click', openConfigPanel);
+  const modelChip = document.getElementById('model-chip');
+  modelChip.addEventListener('click', openConfigPanel);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !configOverlay.classList.contains('hidden')) closeConfigPanel();
+  });
+
+  /** Header chip: which provider/model is active, so settings are one obvious click away. */
+  function renderModelChip(cfg) {
+    const model = cfg.activeModel || cfg.model || cfg.detectedModel || '';
+    const provider = { local: 'Local', openai: 'OpenAI', anthropic: 'Anthropic' }[cfg.provider] || cfg.provider || '';
+    modelChip.textContent = model ? `${provider} · ${model}` : (provider ? `${provider} · configure model` : 'Configure model');
+    modelChip.classList.toggle('needs-setup', cfg.provider !== 'local' && cfg.provider && !cfg.hasToken);
+    modelChip.title = (cfg.provider && cfg.provider !== 'local' && !cfg.hasToken)
+      ? 'No API token set — click to open settings'
+      : `${cfg.endpoint || ''}${model ? ` — ${model}` : ''} — click to change`;
+  }
   document.getElementById('cfg-cancel').addEventListener('click', closeConfigPanel);
   configOverlay.addEventListener('click', e => {
     if (e.target === configOverlay) closeConfigPanel();
@@ -1664,8 +1759,9 @@
 
       case 'chatCleared':
         messagesEl.innerHTML = '';
-        if (todoEl) { todoEl.remove(); todoEl = null; }
+        hidePlan();
         planReviewEl = null;
+        planReviewPending = false;
         showWelcome();
         break;
 
@@ -1696,6 +1792,11 @@
 
       case 'configState':
         applyConfigState(msg.config);
+        renderModelChip(lastConfig);
+        break;
+
+      case 'openSettings':
+        openConfigPanel();
         break;
 
       case 'mission':

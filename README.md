@@ -24,7 +24,7 @@ Then reload the window (**Developer: Reload Window**). See [RELEASES.md](RELEASE
 | `openai` | `https://api.openai.com` | Standard Chat Completions API. |
 | `anthropic` | `https://api.anthropic.com` | Native Messages API (tool use, streaming) — not a shim. |
 
-Set the provider, endpoint, model, and (for OpenAI/Anthropic) your API token in the **CodeFlare chat panel's settings**. Tokens are kept per-provider in VS Code's encrypted SecretStorage — never in `settings.json`, never committed.
+Set the provider, endpoint, model, and (for OpenAI/Anthropic) your API token in the **CodeFlare chat panel's settings** — the **Settings** button at the top right of the chat, or click the model chip next to the CodeFlare name. Tokens are kept per-provider in VS Code's encrypted SecretStorage — never in `settings.json`, never committed.
 
 ## Quick start
 
@@ -182,6 +182,7 @@ CodeFlare has extensive settings under the **CodeFlare** section (Settings → s
 ## Commands & shortcuts
 
 - **CodeFlare: Open Chat** — `Ctrl/Cmd+Shift+Q`
+- **CodeFlare: Open Settings** — the chat's settings dialog (also the **Settings** button and model chip in the chat header, and the gear in the editor title bar)
 - **CodeFlare: Send Selection to Chat** — `Ctrl/Cmd+Shift+L`
 - Right-click a selection for **Explain / Refactor / Fix Bug / Add Tests / Document Code**
 - **Check VLLM Health**, **Check Environment**, **Stop Agent Servers**, **Metrics Report (compare models)**, **Clear Chat**

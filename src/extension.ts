@@ -143,6 +143,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       chatProvider.togglePanel();
     }),
 
+    vscode.commands.registerCommand('codeflare.openSettings', () => {
+      chatProvider.openSettings();
+    }),
+
     vscode.commands.registerCommand('codeflare.sendSelection', () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) { return; }
