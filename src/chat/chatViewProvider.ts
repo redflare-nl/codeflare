@@ -4269,6 +4269,7 @@ export class ChatViewProvider {
       vscode.Uri.joinPath(this._extensionUri, 'media', 'chat.js')
     );
     const nonce = getNonce();
+    const uiUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'ui.js'));
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -4401,6 +4402,7 @@ export class ChatViewProvider {
       </div>
     </div>
   </div>
+  <script nonce="${nonce}" src="${uiUri}"></script>
   <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;

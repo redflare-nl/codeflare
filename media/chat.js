@@ -2022,6 +2022,7 @@
 
   // ── Init ────────────────────────────────────────────
   showWelcome();
+  window.CodeFlareUI.init(vscode);
   inputEl.focus();
   vscode.postMessage({ type: 'getConfig' });
   vscode.postMessage({ type: 'requestHistory' });
