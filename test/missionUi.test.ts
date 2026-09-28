@@ -147,6 +147,40 @@ describe('live mission footer', () => {
   });
 });
 
+describe('memory status (Settings → Memory)', () => {
+  // Runs the PRODUCTION applyMemoryState from chat.js.
+  function memoryHarness() {
+    const status = new Element();
+    const buttons = [new Element(), new Element(), new Element()];
+    const context = vm.createContext({
+      memoryStatusEl: status,
+      reflectButton: new Element(),
+      memoryButtons: [{ button: buttons[0], scope: 'project' }, { button: buttons[1], scope: 'global' }, { button: buttons[2], scope: 'all' }],
+      textElement: (_tag: string, cls = '', text = '') => { const e = new Element(); e.className = cls; e.textContent = text; return e; },
+    });
+    vm.runInContext(section('  function applyMemoryState(state) {', '  const PROVIDER_META = {'), context);
+    return { status, buttons, run: (script: string) => vm.runInContext(script, context) };
+  }
+
+  it('names the project the counts belong to and separates shared agent memory', () => {
+    const ui = memoryHarness();
+    ui.run("applyMemoryState({ available: true, projectAvailable: true, project: 'AgiTest_III', projectSkills: 0, globalSkills: 1, validatedSkills: 0, episodes: 0 })");
+    const text = ui.status.textContent;
+    expect(text).toContain('This project (AgiTest_III): 0 skill(s), 0 recorded experiment(s).');
+    expect(text).toContain('Agent memory (shared by all projects): 1 skill(s).');
+    expect(text).toContain('0 validated — only validated skills are reused automatically');
+    expect(text).toContain('Each project keeps its own memory');
+    expect(text).not.toContain('Stored now'); // the old, scope-less wording
+  });
+
+  it('says plainly when this window has no project storage, and disables project actions', () => {
+    const ui = memoryHarness();
+    ui.run("applyMemoryState({ available: true, projectAvailable: false, projectSkills: 0, globalSkills: 2, validatedSkills: 1, episodes: 0 })");
+    expect(ui.status.textContent).toContain('This project: no project storage in this window.');
+    expect(ui.buttons.map(b => b.disabled)).toEqual([true, false, true]);
+  });
+});
+
 describe('mission budget fields (Settings → Budget)', () => {
   // Loads the PRODUCTION block from chat.js, so this breaks if the fields change.
   function budgetHarness() {

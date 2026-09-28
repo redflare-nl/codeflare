@@ -1584,8 +1584,11 @@ export class ChatViewProvider {
       this._postMessage({ type: 'memoryState', state: { available: false } });
       return;
     }
+    // The project name makes the scope explicit: project memory is per
+    // workspace, and "0 experiments" here says nothing about other projects.
+    const project = vscode.workspace.workspaceFolders?.[0]?.name;
     this._knowledge.status().then(
-      status => this._postMessage({ type: 'memoryState', state: { available: true, ...status } }),
+      status => this._postMessage({ type: 'memoryState', state: { available: true, project, ...status } }),
       error => this._postMessage({ type: 'memoryState', state: { available: false, error: (error as Error).message } }),
     );
   }

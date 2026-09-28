@@ -1583,13 +1583,18 @@
       memoryButtons.forEach(({ button }) => { button.disabled = true; });
       return;
     }
-    const counts = [
-      state.projectSkills + ' project skill(s)',
-      state.globalSkills + ' agent skill(s)',
-      state.episodes + ' recorded experiment(s)',
-    ];
-    memoryStatusEl.textContent = 'Stored now: ' + counts.join(' · ') +
-      (state.projectAvailable ? '' : ' — no project storage in this window.');
+    // Name the scope of every number: project memory belongs to THIS workspace,
+    // so an empty project here is not an empty memory overall.
+    const where = state.project ? `This project (${state.project})` : 'This project';
+    memoryStatusEl.replaceChildren(
+      textElement('div', '', state.projectAvailable
+        ? `${where}: ${state.projectSkills} skill(s), ${state.episodes} recorded experiment(s).`
+        : `${where}: no project storage in this window.`),
+      textElement('div', '', `Agent memory (shared by all projects): ${state.globalSkills} skill(s).`),
+      textElement('div', '', `${state.validatedSkills || 0} validated — only validated skills are reused automatically; ` +
+        'a candidate first has to pass a mission with test evidence.'),
+      textElement('div', '', 'Each project keeps its own memory: open another project to see what it learned there.'),
+    );
     memoryButtons.forEach(({ button, scope }) => {
       button.disabled = scope !== 'global' && !state.projectAvailable;
     });
