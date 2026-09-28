@@ -6,6 +6,7 @@ import { MemoryEmbedder } from './memoryEmbeddings';
 import { MemoryRecallRecord, recallMemories } from './memoryRecall';
 import { ClearedKnowledge, ScopedKnowledgeStore } from './scopedKnowledge';
 import { ReflectionInput, ReflectionOutcome, ReflectionProposal, applyReflection, boundReflectionInput } from './reflection';
+import { MemoryMap, buildMemoryMap } from './memoryMap';
 import { BACKLOG_LIMITS, BacklogDerivationInput, BacklogItem, BacklogState, coerceBacklog, deriveBacklog, emptyBacklog } from './backlog';
 
 /** A skill as it was (or was not) presented to the model this turn. */
@@ -273,6 +274,20 @@ export class MemoryService extends ScopedKnowledgeStore {
     const state = await this.projectDb.readState<ReflectionState>('reflection');
     const seen = state && state.schemaVersion === 1 && Number.isFinite(state.episodesSeen) ? state.episodesSeen : 0;
     return total - seen >= minNewEpisodes;
+  }
+
+  /** Everything Settings → Memory map draws, bounded; see memoryMap.ts for what each part means. */
+  async map(projectName?: string): Promise<MemoryMap> {
+    const snapshot = await this.list();
+    const records = this.projectDb ? episodes(await this.projectDb.readState<Episodes>('episodes')).records : [];
+    const reflection = this.projectDb ? await this.projectDb.readState<ReflectionState>('reflection') : undefined;
+    const facts = this.options.projectFacts && this.projectDb ? await this.options.projectFacts().catch(() => '') : '';
+    return buildMemoryMap({
+      projectAvailable: !!this.projectDb, projectName,
+      skills: snapshot.skills, landscapes: snapshot.landscapes, episodes: records, factsText: facts,
+      backlog: (await this.readBacklog()).items,
+      lastReflectionAt: reflection && reflection.schemaVersion === 1 ? reflection.lastAt : undefined,
+    });
   }
 
   async status() {

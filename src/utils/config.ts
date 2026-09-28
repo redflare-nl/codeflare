@@ -145,6 +145,8 @@ export interface CodeFlareConfig {
   /** Per-field overrides on the autonomous mission budget (0 = unlimited). */
   /** Overrides from the codeflare.missionBudget.* settings (wall time already in ms). */
   missionBudget: Partial<MissionBudget>;
+  /** Local provider: the mission token ceiling does not apply (tokens cost nothing locally). */
+  missionBudgetLocalUnlimitedTokens: boolean;
   /** Fraction of autonomous missions in which an eligible skill is deliberately withheld (control trial). */
   skillHoldoutRate: number;
   /** Backlog items one Night Shift run may work through. */
@@ -241,6 +243,7 @@ export function getConfig(): CodeFlareConfig {
     judgeEndpoint: (cfg.get<string>('judgeEndpoint', '') || '').trim(),
     judgeModel: (cfg.get<string>('judgeModel', '') || '').trim(),
     memoryReflection: cfg.get<string>('memoryReflection', 'manual') === 'after-mission' ? 'after-mission' : 'manual',
+    missionBudgetLocalUnlimitedTokens: cfg.get<boolean>('missionBudget.localUnlimitedTokens', true),
     missionBudget: missionBudgetFromSettings({
       maxTurns: cfg.get('missionBudget.maxTurns'),
       maxToolCalls: cfg.get('missionBudget.maxToolCalls'),

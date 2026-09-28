@@ -92,6 +92,21 @@ export function currentEvidence(items: EvidenceItem[]): EvidenceItem[] {
 }
 
 /** Dependency-install side effect (modifies manifests outside the turn diff). */
+/**
+ * Read-only inspection of the filesystem or repo: listing a folder, printing a
+ * file, locating an executable. These show what EXISTS, not what the code DOES,
+ * so they are never behavioural evidence — neither a pass (a `dir` that worked
+ * proves nothing about the game) nor a fail (a `dir` of a missing folder once
+ * REJECTED a whole mission). Only a command whose every pipeline stage is such
+ * an inspection qualifies; anything that runs project code stays RUNTIME.
+ */
+const INSPECT_STAGE_RE = /^(?:dir|ls|ll|tree|type|cat|head|tail|more|less|wc|find|findstr|grep|rg|where|which|pwd|cd|echo|stat|file|du|df|get-childitem|gci|get-content|gc|get-item|gi|get-location|gl|test-path|resolve-path|select-string|sls|select-object|select|measure-object|measure|sort-object|sort|format-list|fl|format-table|ft|out-string|write-output|write-host|get-command|gcm|git\s+(?:status|log|diff|show|branch|ls-files|rev-parse|remote))(?:\s|$)/i;
+
+export function isInspectionCommand(command: string): boolean {
+  const stages = String(command || '').split(/\|\||&&|[|;]/).map(s => s.trim()).filter(Boolean);
+  return stages.length > 0 && stages.every(s => INSPECT_STAGE_RE.test(s.replace(/^\(|\)$/g, '').trim()));
+}
+
 const INSTALL_RE =
   /\b(npm|pnpm|yarn)\s+(install|add|i)\b|\bpip3?\s+install\b|\b(cargo\s+add|go\s+get|dotnet\s+add|gem\s+install)\b/i;
 
@@ -120,6 +135,9 @@ export function classifyToolEvidence(
       : /started|listening|serving|running in a background terminal/i.test(out) ? 'started (server)'
       : 'ran';
     const install = INSTALL_RE.test(cmd);
+    if (isInspectionCommand(cmd)) {
+      return makeEvidence('RUNTIME', 'run_command', `inspect: ${cmd.slice(0, 100)} → ${res} (not a behavioural check)`, 'info', phase);
+    }
     return makeEvidence('RUNTIME', 'run_command',
       `run: ${cmd.slice(0, 100)} → ${res}` +
       (install ? ' [installs a dependency → modifies the package manifest/lockfile, NOT shown in the diff]' : ''),

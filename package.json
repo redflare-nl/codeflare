@@ -26,7 +26,8 @@
     "Chat"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:codeflare.chatPanel"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -782,6 +783,11 @@
           "default": 24000000,
           "minimum": 0,
           "markdownDescription": "**Mission budget** — maximum prompt + completion tokens across one autonomous mission. `0` = unlimited."
+        },
+        "codeflare.missionBudget.localUnlimitedTokens": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Mission budget** — with a local model (`codeflare.provider` = `local`) the token ceiling is not applied: tokens cost nothing locally, the real limits are turns and time. Turn this off to apply `maxTokens` to local models too."
         },
         "codeflare.missionBudget.maxWallMinutes": {
           "type": "integer",

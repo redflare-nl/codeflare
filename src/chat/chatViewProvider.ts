@@ -5,7 +5,8 @@ import { resolveJudgeTarget } from '../llm/judge';
 import { buildReflectionMessages, parseReflection } from '../engine/reflection';
 import { CalibrationPolicy, calibrationPolicy, computeCalibration } from '../engine/calibration';
 import {
-  DEFAULT_MISSION_BUDGET, MissionBudget, accumulateMissionUsage, checkMissionBudget, coerceMissionUsage, describeMissionUsage,
+  DEFAULT_MISSION_BUDGET, MissionBudget, MissionBudgetStage, MissionUsage, accumulateMissionUsage, checkMissionBudget, coerceMissionUsage, describeMissionUsage,
+  liveMissionUsage, missionBudgetNote, missionBudgetPressure, stageEscalated,
   missionBudgetToSettings, resolveMissionBudget,
 } from '../engine/missionBudget';
 import { BacklogItem, BacklogStatus, describeBacklog, goalPrompt } from '../engine/backlog';
@@ -373,7 +374,7 @@ export class ChatViewProvider {
         this._missionPersistenceError = undefined;
       }).catch(err => { this._missionPersistenceError = err; log(`Mission persistence failed: ${err.message}`); });
     }
-    this._postMessage({ type: 'mission', mission: snapshot || null, maxParallelAgents: this._agentPool?.limit ?? getConfig().maxParallelAgents });
+    this._postMessage({ type: 'mission', mission: snapshot || null, maxParallelAgents: this._agentPool?.limit ?? this._agentLimit() });
   }
 
   private _missionPhase(phase: MissionPhase, activity: string): void {
@@ -551,7 +552,44 @@ export class ChatViewProvider {
 
   /** The autonomous mission budget: shipped defaults with the user's per-field overrides. */
   private _missionBudget(): MissionBudget {
+    const cfg = getConfig();
+    const budget = this._configuredMissionBudget();
+    // Local tokens cost nothing: the ceiling that matters there is turns and time.
+    if (cfg.provider === 'local' && cfg.missionBudgetLocalUnlimitedTokens) { budget.maxTokens = 0; }
+    return budget;
+  }
+
+  /** The budget exactly as configured — what the Settings dialog edits and saves. */
+  private _configuredMissionBudget(): MissionBudget {
     return resolveMissionBudget(DEFAULT_MISSION_BUDGET, getConfig().missionBudget);
+  }
+
+  /** The budget note for this turn's system prompt; also records the stage it announced. */
+  private _missionBudgetPromptBlock(): string {
+    const live = this._missionBudgetLive();
+    const budget = this._missionBudget();
+    const note = live ? missionBudgetNote(live.usage, budget, live.avgPromptPerCall) : '';
+    this._budgetStageAnnounced = live ? missionBudgetPressure(live.usage, budget)?.stage ?? 'normal' : 'normal';
+    return note ? '\n\n' + note : '';
+  }
+
+  /** The budget stage the model was last told about (system prompt or in-turn note). */
+  private _budgetStageAnnounced: MissionBudgetStage = 'normal';
+
+  /**
+   * Usage of the running AUTONOMOUS mission including the turn in progress, so
+   * the model can steer by what is left. Undefined when no budget applies
+   * (interactive, no mission, or already completed).
+   */
+  private _missionBudgetLive(): { usage: MissionUsage; avgPromptPerCall?: number } | undefined {
+    const mission = this._mission;
+    if (!mission || !mission.autonomous || mission.status === 'completed') { return undefined; }
+    const t = this._turnMetrics;
+    const usage = liveMissionUsage(coerceMissionUsage(mission.usage), {
+      toolCalls: t?.toolCalls ?? 0, promptTokens: t?.promptTokens ?? 0,
+      completionTokens: t?.completionTokens ?? 0, elapsedMs: t ? Date.now() - t.startedAt : 0,
+    });
+    return { usage, ...(t && t.modelCalls > 0 ? { avgPromptPerCall: t.promptTokens / t.modelCalls } : {}) };
   }
 
   /** FNV-1a over the seed, scaled to [0,1): the same mission+skill always draws the same number. */
@@ -1196,22 +1234,43 @@ export class ChatViewProvider {
       return;
     }
 
-    this._panel = vscode.window.createWebviewPanel(
-      'codeflare.chatPanel',
+    this._attachPanel(vscode.window.createWebviewPanel(
+      ChatViewProvider.panelType,
       'CodeFlare Chat',
       { viewColumn: vscode.ViewColumn.Two, preserveFocus: true },
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')],
-      }
-    );
+      { ...this._webviewOptions(), retainContextWhenHidden: true }
+    ));
+  }
 
-    this._panel.webview.html = this._getHtmlForWebview(this._panel.webview);
-    this._setupWebviewMessageHandler(this._panel.webview);
+  /** The webview panel type; also the key VS Code restores it by after a reload. */
+  static readonly panelType = 'codeflare.chatPanel';
 
-    this._panel.onDidDispose(() => {
-      this._panel = undefined;
+  private _webviewOptions(): vscode.WebviewOptions {
+    return { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')] };
+  }
+
+  /**
+   * Re-attach a panel VS Code restored after a window reload (see the serializer
+   * in extension.ts). Without this the chat simply vanished on reload, while its
+   * conversation was still stored: the fresh webview asks for its state and gets
+   * the transcript back, exactly like a newly opened panel.
+   */
+  restorePanel(panel: vscode.WebviewPanel): void {
+    if (this._panel && this._panel !== panel) {
+      // Two restored panels (e.g. two editor groups): keep one chat, not two.
+      panel.dispose();
+      return;
+    }
+    panel.webview.options = this._webviewOptions();
+    this._attachPanel(panel);
+  }
+
+  private _attachPanel(panel: vscode.WebviewPanel): void {
+    this._panel = panel;
+    panel.webview.html = this._getHtmlForWebview(panel.webview);
+    this._setupWebviewMessageHandler(panel.webview);
+    panel.onDidDispose(() => {
+      if (this._panel === panel) { this._panel = undefined; }
     });
   }
 
@@ -1332,6 +1391,9 @@ export class ChatViewProvider {
           break;
         case 'reflectMemory':
           await this.reflectMemory('manual');
+          break;
+        case 'getMemoryMap':
+          await this._sendMemoryMap();
           break;
         case 'revertCheckpoint':
           await this._revertCheckpoint(msg.id);
@@ -1494,7 +1556,8 @@ export class ChatViewProvider {
         maxParallelAgents: config.maxParallelAgents,
         // Effective values (defaults merged with the user's settings), in the
         // shape the dialog edits: wall time in minutes.
-        missionBudget: missionBudgetToSettings(this._missionBudget()),
+        missionBudget: missionBudgetToSettings(this._configuredMissionBudget()),
+        missionBudgetLocalUnlimitedTokens: config.missionBudgetLocalUnlimitedTokens,
         autonomousMode: config.autonomousMode,
         autoTest: config.autoTest,
         fastMode: config.fastMode,
@@ -1627,6 +1690,20 @@ export class ChatViewProvider {
     );
   }
 
+  /** The Memory map: every kind of memory, and how each one reaches the model. */
+  private async _sendMemoryMap(): Promise<void> {
+    if (!this._knowledge) {
+      this._postMessage({ type: 'memoryMap', error: 'Memory storage is unavailable in this window.' });
+      return;
+    }
+    try {
+      const map = await this._knowledge.map(vscode.workspace.workspaceFolders?.[0]?.name);
+      this._postMessage({ type: 'memoryMap', map });
+    } catch (error) {
+      this._postMessage({ type: 'memoryMap', error: (error as Error).message });
+    }
+  }
+
   private async _handleSaveConfig(cfg: {
     provider?: string;
     endpoint?: string;
@@ -1639,6 +1716,7 @@ export class ChatViewProvider {
     autoTest?: boolean;
     fastMode?: boolean;
     missionBudget?: Record<string, unknown>;
+    missionBudgetLocalUnlimitedTokens?: boolean;
   }): Promise<void> {
     const settings = vscode.workspace.getConfiguration('codeflare');
     for (const key of ['autonomousMode', 'autoTest', 'fastMode'] as const) {
@@ -1654,6 +1732,10 @@ export class ChatViewProvider {
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) { continue; }
         await settings.update(`missionBudget.${key}`, v === defaults[key] ? undefined : v, vscode.ConfigurationTarget.Global);
       }
+    }
+    if (typeof cfg.missionBudgetLocalUnlimitedTokens === 'boolean') {
+      await settings.update('missionBudget.localUnlimitedTokens',
+        cfg.missionBudgetLocalUnlimitedTokens ? undefined : false, vscode.ConfigurationTarget.Global);
     }
     if (typeof cfg.maxParallelAgents === 'number' && Number.isInteger(cfg.maxParallelAgents) && cfg.maxParallelAgents >= 1 && cfg.maxParallelAgents <= 32) {
       await settings.update('maxParallelAgents', cfg.maxParallelAgents, vscode.ConfigurationTarget.Global);
@@ -2044,7 +2126,8 @@ export class ChatViewProvider {
         'Respect existing permissions and budgets. Do not stop at a plan. An independent test author will check changed code after implementation. ' +
         'Persist reusable procedures as candidate skills using save_skill. Use scope=project for project-specific knowledge; ' +
         'use scope=global only for general methods that can help other projects, with project names, private paths, secrets and customer details removed. ' +
-        'Project landscapes and facts stay local to this workspace. Candidate skills are not authoritative instructions.' : '');
+        'Project landscapes and facts stay local to this workspace. Candidate skills are not authoritative instructions.' : '') +
+      this._missionBudgetPromptBlock();
     setGroundingNote([]);
     setReviewMode(false);
     setProblemShape(null);
@@ -2651,6 +2734,9 @@ export class ChatViewProvider {
     // current tool batch (every call in the batch still gets a result so
     // tool-call pairing stays valid).
     let budgetStop = '';
+    // Set when the MISSION budget is spent: the next reply is the final report
+    // and the turn ends after it, before any further tool call runs.
+    let missionBudgetFinal = false;
     // Set when a fresh plan pauses this turn for user review.
     let pausedForPlan = false;
     this._planAwaitingReview = false;
@@ -2695,6 +2781,23 @@ export class ChatViewProvider {
         let stepText = '';
         let lastProgress = 0;
         let lastProgressLog = 0;
+        // Mission budget awareness: when the running mission crosses a stage
+        // (half, 80%, spent), tell the model once — appended, so the prompt
+        // prefix cache survives. At "spent" this reply is the last one.
+        const live = this._missionBudgetLive();
+        if (live) {
+          const budgetNow = this._missionBudget();
+          const pressure = missionBudgetPressure(live.usage, budgetNow);
+          if (pressure && stageEscalated(this._budgetStageAnnounced, pressure.stage)) {
+            this._budgetStageAnnounced = pressure.stage;
+            messages.push({ role: 'user', content: 'CONTROLLER NOTE (automated, not user feedback): ' +
+              missionBudgetNote(live.usage, budgetNow, live.avgPromptPerCall) });
+            const pct = Math.min(100, Math.round(pressure.fraction * 100));
+            this._postMessage({ type: 'toolActivity', label: `mission budget ${pct}% used (${pressure.binding}) — ${pressure.stage}` });
+            log(`Mission budget: ${pct}% used (${pressure.binding}) — stage ${pressure.stage} announced to the model`);
+            if (pressure.stage === 'exhausted') { missionBudgetFinal = true; }
+          }
+        }
         this._applyTurnPruning(pruner, messages, 'agent');
         // Verify-only turns (Prove It / Break My Solution) run on the judge when
         // one is configured: the model that did the work must not grade it.
@@ -2825,6 +2928,8 @@ export class ChatViewProvider {
         // can't perform here (e.g. "test in a browser") so it doesn't loop.
         if (result.toolCalls.length === 0) {
           log(`Agent step ${step + 1}: no tool calls (finish=${result.finishReason || 'stop'}, ${stripThink(result.content).trim().length} chars text)`);
+          // Budget spent: this was the final report — no "continue your plan" nudges.
+          if (missionBudgetFinal) { break; }
 
           // The model sometimes emits its tool call as LITERAL TEXT into the
           // reasoning channel (<tool_call><function=…>) — the server can't
@@ -2936,6 +3041,14 @@ export class ChatViewProvider {
             fullResponse = '';
             continue;
           }
+          break;
+        }
+
+        // Budget spent and the model still reached for tools: end the turn
+        // WITHOUT running them (and without recording unpaired tool calls).
+        if (missionBudgetFinal) {
+          this._postMessage({ type: 'toolActivity', label: `mission budget spent — ${result.toolCalls.length} tool call(s) not run` });
+          log(`Mission budget spent: ${result.toolCalls.length} tool call(s) after the final notice were not run`);
           break;
         }
 
@@ -4318,6 +4431,8 @@ export class ChatViewProvider {
     );
     const nonce = getNonce();
     const uiUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'ui.js'));
+    const mapUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'memoryMap.js'));
+    const mapCssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'memoryMap.css'));
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -4327,6 +4442,7 @@ export class ChatViewProvider {
     content="default-src 'none'; img-src data: ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link href="${cssUri}" rel="stylesheet">
+  <link href="${mapCssUri}" rel="stylesheet">
   <title>CodeFlare Chat</title>
 </head>
 <body>
@@ -4354,7 +4470,7 @@ export class ChatViewProvider {
         <button id="copylog-btn" title="Copy chat + extension log to clipboard">&#128203;</button>
         <button id="export-btn" title="Export chat as markdown (with screenshots)">&#128190;</button>
       </div>
-      <div class="input-actions">
+      <div id="input-actions" class="input-actions">
         <button id="clear-btn" title="Clear chat">Clear</button>
         <button id="stop-btn" title="Stop generation" style="display:none">Stop</button>
         <button id="send-btn" title="Send (Enter)">Send</button>
@@ -4442,6 +4558,9 @@ export class ChatViewProvider {
             Each button asks for confirmation first, and cannot be undone.
           </div>
         </div>
+        <div class="config-pane hidden" data-pane="memory-map">
+          <div id="memory-map" class="memory-map" aria-live="polite">Loading the memory map…</div>
+        </div>
 
         <div class="config-actions">
           <button id="cfg-cancel">Cancel</button>
@@ -4451,6 +4570,7 @@ export class ChatViewProvider {
     </div>
   </div>
   <script nonce="${nonce}" src="${uiUri}"></script>
+  <script nonce="${nonce}" src="${mapUri}"></script>
   <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;

@@ -88,7 +88,6 @@
     missionResume.disabled = true;
     vscode.postMessage({ type: 'resumeMission' });
   });
-  missionHeading.append(missionStatus, missionCount, missionResume);
   const missionPhases = textElement('ol', 'mission-phases');
   missionPhases.setAttribute('aria-label', 'Fasen');
   const missionPhaseNodes = MISSION_PHASES.map(([phase, label]) => {
@@ -97,6 +96,7 @@
     missionPhases.appendChild(el);
     return el;
   });
+  missionHeading.append(missionStatus, missionPhases, missionCount, missionResume);
   const missionActivity = textElement('div', 'mission-activity');
   missionActivity.setAttribute('role', 'status');
   missionActivity.setAttribute('aria-live', 'polite');
@@ -112,7 +112,7 @@
   const missionHistory = textElement('ol', 'mission-history');
   missionDetailBody.append(missionAgentsTitle, missionAgents, missionHistoryTitle, missionHistory);
   missionDetails.append(missionSummary, missionDetailBody);
-  missionProgress.append(missionHeading, missionPhases, missionActivity, missionReturn, missionTests, missionDetails);
+  missionProgress.append(missionHeading, missionActivity, missionReturn, missionTests, missionDetails);
   const selfUpdateStatus = textElement('div', 'mission-self-update');
   selfUpdateStatus.hidden = true;
   selfUpdateStatus.setAttribute('role', 'status');
@@ -161,13 +161,17 @@
       if (active) el.setAttribute('aria-current', 'step');
       else el.removeAttribute('aria-current');
     });
-    missionActivity.textContent = `${phaseLabel(mission.phase)} — ${mission.activity || status}`;
+    missionActivity.hidden = !mission.activity;
+    missionActivity.textContent = mission.activity || '';
     const latest = transitions[transitions.length - 1];
     missionReturn.hidden = !latest || !latest.backward;
     missionReturn.textContent = latest && latest.backward
       ? `↶ ${phaseLabel(latest.from)} → ${phaseLabel(latest.to)}: ${latest.reason || 'Aanpak herzien'}` : '';
-    missionTests.hidden = !mission.testStatus;
-    missionTests.textContent = TEST_STATUSES[mission.testStatus] || String(mission.testStatus || '');
+    // Planned tests are not evidence or live activity; show only meaningful feedback.
+    missionTests.hidden = !mission.testStatus || ['pending', 'not_requested'].includes(mission.testStatus);
+    missionTests.textContent = missionTests.hidden ? '' : (TEST_STATUSES[mission.testStatus] || String(mission.testStatus));
+    missionTests.dataset.status = mission.testStatus || '';
+    missionDetails.hidden = agents.length === 0 && transitions.length === 0;
     missionSummary.textContent = `Agents (${agents.length}) en geschiedenis (${transitions.length})`;
 
     missionAgents.replaceChildren();
@@ -231,7 +235,7 @@
   const autoTestInput = createMissionOption('mission-auto-test', 'Tests schrijven en uitvoeren', 'autoTest');
   const fastModeInput = createMissionOption('mission-fast', 'Snelle modus', 'fastMode',
     'Minder nadenken per stap: sneller en goedkoper, minder grondig bij lastige problemen. Wordt onthouden.');
-  inputArea.prepend(autonomyOptions);
+  document.getElementById('input-actions').prepend(autonomyOptions);
 
   function syncMissionOptions() {
     autonomousModeInput.checked = lastConfig.autonomousMode === true;
@@ -1463,7 +1467,7 @@
   let lastConfig = {
     endpoint: '', model: '', hasToken: false, trustedCommands: [], confirmCommands: true,
     autonomousMode: false, autoTest: false, fastMode: false, maxParallelAgents: 32,
-    missionBudget: { maxTurns: 192, maxToolCalls: 9600, maxTokens: 24000000, maxWallMinutes: 1440, maxStalledTurns: 48 },
+    missionBudget: { maxTurns: 192, maxToolCalls: 9600, maxTokens: 24000000, maxWallMinutes: 1440, maxStalledTurns: 48 }, missionBudgetLocalUnlimitedTokens: true,
   };
 
   const agentsConfigTab = textElement('button', 'config-tab', 'Agents');
@@ -1500,6 +1504,13 @@
   ];
   let missionBudgetDirty = false;
   const missionBudgetInputs = {};
+  // "Onbeperkt" per ceiling: an explicit switch instead of knowing that 0 means
+  // unlimited. Checked = the field is saved as 0 and disabled; unchecking brings
+  // back the last real number (or the shipped default).
+  const missionBudgetUnlimited = {};
+  const missionBudgetLastValue = {};
+  const MISSION_BUDGET_DEFAULTS = { maxTurns: 192, maxToolCalls: 9600, maxTokens: 24000000, maxWallMinutes: 1440, maxStalledTurns: 48 };
+  let missionBudgetLocalTokens = null;
   // Its own tab: the budget bounds a MISSION, which is unrelated to how many
   // subagents run at once. Appended before the tab click-binding below, so the
   // generic handler covers it.
@@ -1510,10 +1521,29 @@
   const budgetConfigPane = textElement('div', 'config-pane hidden');
   budgetConfigPane.dataset.pane = 'budget';
   budgetConfigPane.append(textElement('div', 'config-hint',
-    'Plafonds voor één autonome missie als geheel (alle turns, herstelrondes en teststap). 0 = onbeperkt. ' +
+    'Plafonds voor één autonome missie als geheel (alle turns, herstelrondes en teststap). ' +
     'Een missie die een plafond bereikt wordt gepauzeerd met de reden. Interactieve missies worden nooit begrensd.'));
+  function budgetCheckbox(id, text, onChange) {
+    const wrap = textElement('label', 'budget-unlimited');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.id = id;
+    box.addEventListener('change', () => { missionBudgetDirty = true; onChange(); });
+    wrap.append(box, textElement('span', '', text));
+    return { wrap, box };
+  }
+  function syncUnlimited(key) {
+    const input = missionBudgetInputs[key];
+    const unlimited = missionBudgetUnlimited[key].checked;
+    if (unlimited && input.value !== '' && Number(input.value) > 0) { missionBudgetLastValue[key] = input.value; }
+    if (!unlimited && (input.value === '' || Number(input.value) === 0)) {
+      input.value = String(missionBudgetLastValue[key] || MISSION_BUDGET_DEFAULTS[key]);
+    }
+    input.disabled = unlimited;
+    if (unlimited) { input.value = '0'; }
+  }
   for (const [key, label] of MISSION_BUDGET_FIELDS) {
-    const field = textElement('label', 'config-field');
+    const field = textElement('div', 'config-field');
     const input = document.createElement('input');
     input.id = `cfg-mission-${key}`;
     input.type = 'number';
@@ -1521,17 +1551,39 @@
     input.step = '1';
     input.required = true;
     input.addEventListener('input', () => { missionBudgetDirty = true; });
-    field.append(textElement('span', '', label), input);
+    const caption = textElement('label', '', label);
+    caption.setAttribute('for', input.id);
+    const row = textElement('div', 'budget-row');
+    const unlimited = budgetCheckbox(`cfg-mission-${key}-unlimited`, 'Onbeperkt', () => syncUnlimited(key));
+    missionBudgetUnlimited[key] = unlimited.box;
+    row.append(input, unlimited.wrap);
+    field.append(caption, row);
+    if (key === 'maxTokens') {
+      // Tokens cost nothing on a local model; turns and time are the real limits there.
+      const local = budgetCheckbox('cfg-mission-local-tokens', 'Onbeperkt bij een lokaal model', () => {});
+      missionBudgetLocalTokens = local.box;
+      field.append(local.wrap);
+    }
     budgetConfigPane.append(field);
     missionBudgetInputs[key] = input;
   }
   document.querySelector('.config-actions').before(budgetConfigPane);
 
-  function fillMissionBudget(budget) {
+  function fillMissionBudget(budget, localUnlimitedTokens) {
     for (const [key] of MISSION_BUDGET_FIELDS) {
       const v = budget && typeof budget[key] === 'number' ? budget[key] : '';
       missionBudgetInputs[key].value = String(v);
+      missionBudgetUnlimited[key].checked = v === 0;
+      missionBudgetInputs[key].disabled = v === 0;
+      if (typeof v === 'number' && v > 0) { missionBudgetLastValue[key] = String(v); }
     }
+    missionBudgetLocalTokens.checked = localUnlimitedTokens !== false;
+  }
+
+  /** The Budget tab as the host saves it: an unlimited ceiling is 0. */
+  function readMissionBudget() {
+    return Object.fromEntries(MISSION_BUDGET_FIELDS.map(([key]) =>
+      [key, missionBudgetUnlimited[key].checked ? 0 : Number(missionBudgetInputs[key].value)]));
   }
 
   function selectConfigTab(name) {
@@ -1553,6 +1605,8 @@
   memoryConfigTab.dataset.tab = 'memory';
   memoryConfigTab.addEventListener('click', () => selectConfigTab('memory'));
   document.querySelector('.config-tabs').appendChild(memoryConfigTab);
+  // The Memory map (media/memoryMap.js) adds its tab right after this one.
+  if (window.CodeFlareMemoryMap) { window.CodeFlareMemoryMap.init(vscode); }
 
   // The confirmation lives on the extension side (a real modal), so these
   // buttons only ask; they never assume the erase happened.
@@ -1669,7 +1723,7 @@
     document.getElementById('cfg-confirm-commands').checked = lastConfig.confirmCommands !== false;
     agentLimitInput.value = String(boundedAgentLimit(lastConfig.maxParallelAgents));
     agentLimitDirty = false;
-    fillMissionBudget(lastConfig.missionBudget);
+    fillMissionBudget(lastConfig.missionBudget, lastConfig.missionBudgetLocalUnlimitedTokens);
     missionBudgetDirty = false;
     updateProviderHint();
     updateModelPlaceholder();
@@ -1712,6 +1766,7 @@
     }
     for (const [key] of MISSION_BUDGET_FIELDS) {
       const input = missionBudgetInputs[key];
+      if (missionBudgetUnlimited[key].checked) { continue; }
       if (!input.checkValidity() || !Number.isInteger(Number(input.value))) {
         selectConfigTab('budget');
         input.reportValidity();
@@ -1731,7 +1786,8 @@
       autoTest: lastConfig.autoTest === true,
       fastMode: fastModeInput.checked,
       maxParallelAgents: Number(agentLimitInput.value),
-      missionBudget: Object.fromEntries(MISSION_BUDGET_FIELDS.map(([key]) => [key, Number(missionBudgetInputs[key].value)])),
+      missionBudget: readMissionBudget(),
+      missionBudgetLocalUnlimitedTokens: missionBudgetLocalTokens.checked,
     };
     // Only send the token when the user typed something, so an empty field
     // keeps the previously stored token instead of wiping it.
@@ -1748,7 +1804,7 @@
       agentLimitInput.value = String(configuredAgentLimit);
     }
     if (configOverlay.classList.contains('hidden') || !missionBudgetDirty) {
-      fillMissionBudget(lastConfig.missionBudget);
+      fillMissionBudget(lastConfig.missionBudget, lastConfig.missionBudgetLocalUnlimitedTokens);
     }
     renderMission(currentMission);
     if (endpointLabel) {

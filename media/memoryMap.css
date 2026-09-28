@@ -1,0 +1,98 @@
+/* Settings → Memory map (media/memoryMap.js). Theme colours come from VS Code,
+   so the map follows light, dark and high-contrast themes. */
+.memory-map {
+  container-type: inline-size;
+  --mm-border: var(--glass-border, var(--vscode-widget-border, rgba(128,128,128,.3)));
+  --mm-field: var(--glass-field, var(--vscode-input-background, transparent));
+  --mm-muted: var(--vscode-descriptionForeground);
+  --mm-ok: var(--vscode-testing-iconPassed, #3fb950);
+  --mm-fail: var(--vscode-testing-iconFailed, #f85149);
+  --mm-open: var(--vscode-disabledForeground, #8b949e);
+  --mm-always: var(--vscode-charts-blue, #3794ff);
+  --mm-auto: var(--vscode-charts-green, #89d185);
+  --mm-request: var(--vscode-charts-yellow, #cca700);
+  --mm-stored: var(--vscode-disabledForeground, #8b949e);
+  --mm-nightshift: var(--vscode-charts-purple, #b180d7);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.mm-root { display: flex; flex-direction: column; gap: 14px; }
+
+.mm-top { display: flex; gap: 8px; align-items: stretch; }
+.mm-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; flex: 1; }
+.mm-tile { border: 1px solid var(--mm-border); border-radius: 12px; padding: 8px 10px; background: var(--mm-field);
+  display: flex; flex-direction: column; gap: 2px; border-top: 3px solid var(--mm-tile-accent, var(--mm-border)); }
+.mm-tile-always { --mm-tile-accent: var(--mm-always); }
+.mm-tile-auto { --mm-tile-accent: var(--mm-auto); }
+.mm-tile-request { --mm-tile-accent: var(--mm-request); }
+.mm-tile-value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.mm-tile-label { color: var(--mm-muted); }
+.mm-refresh { align-self: flex-start; margin: 0; padding: 7px 12px; border-radius: 10px; cursor: pointer; font: inherit;
+  border: 1px solid var(--mm-border); background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, inherit); }
+.mm-refresh:hover { background: var(--vscode-button-secondaryHoverBackground, var(--mm-field)); }
+
+.mm-lane { border: 1px solid var(--mm-border); border-radius: 14px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+.mm-lane-global { border-style: dashed; }
+.mm-lane-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.mm-lane-title { font-weight: 600; font-size: 13px; }
+.mm-lane-name { font-family: var(--vscode-editor-font-family); }
+.mm-lane-hint { color: var(--mm-muted); }
+
+.mm-flow { display: grid; gap: 6px; align-items: stretch; }
+.mm-flow-3 { grid-template-columns: minmax(0, 1.3fr) auto minmax(0, 1fr) auto minmax(0, 1fr); }
+.mm-flow-2 { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+.mm-arrow { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  color: var(--mm-muted); max-width: 86px; text-align: center; font-size: 11px; }
+.mm-arrow-glyph { font-size: 18px; line-height: 1; }
+.mm-side { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+
+.mm-col { border-radius: 10px; background: var(--mm-field); padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.mm-col-head { display: flex; justify-content: space-between; gap: 6px; font-weight: 600; }
+.mm-count { font-variant-numeric: tabular-nums; color: var(--mm-muted); }
+.mm-empty { color: var(--mm-muted); font-style: italic; }
+.mm-note { color: var(--mm-muted); }
+
+.mm-access { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--mm-muted); }
+.mm-access::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--mm-dot); flex-shrink: 0; }
+.mm-access-always { --mm-dot: var(--mm-always); }
+.mm-access-auto { --mm-dot: var(--mm-auto); }
+.mm-access-request { --mm-dot: var(--mm-request); }
+.mm-access-stored { --mm-dot: var(--mm-stored); }
+.mm-access-nightshift { --mm-dot: var(--mm-nightshift); }
+
+.mm-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+.mm-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+.mm-item { margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.mm-experience { width: 18px; height: 18px; padding: 0; border-radius: 4px; border: 2px solid transparent; background: var(--mm-open); }
+.mm-experience.mm-status-ok { background: var(--mm-ok); }
+.mm-experience.mm-status-fail { background: var(--mm-fail); }
+.mm-experience.mm-has-fail { border-color: var(--mm-fail); }
+.mm-experience.mm-status-open.mm-has-fail { background: color-mix(in srgb, var(--mm-open) 55%, transparent); }
+.mm-swatch { display: inline-block; cursor: default; vertical-align: middle; }
+.mm-skill, .mm-fact, .mm-goal, .mm-backlog { display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
+  padding: 4px 7px; border-radius: 7px; border: 1px solid var(--mm-border); background: transparent; }
+.mm-skill.mm-status-validated { border-color: var(--mm-auto); }
+.mm-skill.mm-status-stale { opacity: .6; }
+.mm-item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mm-badge { color: var(--mm-muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mm-item:hover { outline: 1px solid var(--vscode-focusBorder); }
+.mm-item:focus-visible, .mm-item.selected { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
+
+.mm-detail { border: 1px solid var(--mm-border); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.mm-detail-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.mm-detail-head strong { overflow-wrap: anywhere; }
+.mm-detail-where { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; color: var(--mm-muted); }
+.mm-detail-hint, .mm-legend-hint, .mm-meta { color: var(--mm-muted); }
+.mm-detail-label { font-weight: 600; margin-top: 2px; }
+.mm-detail-list { margin: 0; padding-left: 18px; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family); font-size: 11px; }
+.mm-legend { display: flex; flex-direction: column; gap: 5px; }
+.mm-legend-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.mm-legend-row .mm-access { min-width: 170px; }
+
+@container (max-width: 520px) {
+  .mm-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mm-flow-3, .mm-flow-2, .mm-side { grid-template-columns: minmax(0, 1fr); }
+  .mm-arrow { flex-direction: row; max-width: none; }
+  .mm-arrow-glyph { transform: rotate(90deg); }
+}

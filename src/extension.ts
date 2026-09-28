@@ -143,6 +143,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       chatProvider.togglePanel();
     }),
 
+    // Bring the chat back after a window reload, like other chat extensions do.
+    // VS Code only restores a webview panel whose type has a serializer.
+    vscode.window.registerWebviewPanelSerializer(ChatViewProvider.panelType, {
+      deserializeWebviewPanel: async (panel: vscode.WebviewPanel) => { chatProvider.restorePanel(panel); },
+    }),
+
     vscode.commands.registerCommand('codeflare.openSettings', () => {
       chatProvider.openSettings();
     }),
@@ -197,12 +203,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
 
     vscode.commands.registerCommand('codeflare.proveIt', async () => {
-      await vscode.commands.executeCommand('codeflare.chatView.focus');
+      chatProvider.ensurePanel();
       chatProvider.proveIt().catch(err => log(`Prove It failed: ${err.message}`));
     }),
 
     vscode.commands.registerCommand('codeflare.breakMySolution', async () => {
-      await vscode.commands.executeCommand('codeflare.chatView.focus');
+      chatProvider.ensurePanel();
       chatProvider.breakMySolution().catch(err => log(`Break My Solution failed: ${err.message}`));
     }),
 

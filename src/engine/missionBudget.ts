@@ -170,3 +170,106 @@ export function describeMissionUsage(usage: MissionUsage, budget: MissionBudget)
     `${Math.round(usage.wallMs / 60_000)} min${budget.maxWallMs ? '/' + Math.round(budget.maxWallMs / 60_000) : ''}` +
     (usage.stalledTurns ? ` · stalled ${usage.stalledTurns}${lim(budget.maxStalledTurns)}` : '');
 }
+
+/**
+ * How close the mission is to its ceiling — so the MODEL can steer by it, not
+ * only the controller. Without this the budget was a wall the agent could not
+ * see: it spent 80% on polish and research and was then cut off mid-build.
+ *
+ * `fraction` is the most-used of the configured limits (turns, tool calls,
+ * tokens, wall time); stalled turns are reported separately because they are a
+ * "change approach" signal, not a cost.
+ */
+export type MissionBudgetStage = 'normal' | 'prioritise' | 'wrap-up' | 'exhausted';
+
+export interface MissionBudgetPressure {
+  stage: MissionBudgetStage;
+  fraction: number;
+  /** Which limit is closest ('tokens', 'turns', 'tool calls', 'time'). */
+  binding: string;
+  remainingTokens?: number;
+  remainingTurns?: number;
+  remainingToolCalls?: number;
+  remainingMinutes?: number;
+}
+
+const STAGE_RANK: Record<MissionBudgetStage, number> = { normal: 0, prioritise: 1, 'wrap-up': 2, exhausted: 3 };
+
+/** True when `next` asks for more restraint than `previous`. */
+export function stageEscalated(previous: MissionBudgetStage, next: MissionBudgetStage): boolean {
+  return STAGE_RANK[next] > STAGE_RANK[previous];
+}
+
+export function missionBudgetPressure(usage: MissionUsage, budget: MissionBudget): MissionBudgetPressure | undefined {
+  const tokens = usage.promptTokens + usage.completionTokens;
+  const dims: Array<[string, number, number]> = [
+    ['tokens', tokens, budget.maxTokens], ['turns', usage.turns, budget.maxTurns],
+    ['tool calls', usage.toolCalls, budget.maxToolCalls], ['time', usage.wallMs, budget.maxWallMs],
+  ];
+  const limited = dims.filter(([, , max]) => max > 0);
+  if (!limited.length) { return undefined; }
+  let binding = limited[0][0];
+  let fraction = 0;
+  for (const [name, used, max] of limited) {
+    const f = used / max;
+    if (f > fraction) { fraction = f; binding = name; }
+  }
+  const stage: MissionBudgetStage = fraction >= 1 ? 'exhausted' : fraction >= 0.8 ? 'wrap-up' : fraction >= 0.5 ? 'prioritise' : 'normal';
+  const left = (max: number, used: number) => (max > 0 ? Math.max(0, max - used) : undefined);
+  const out: MissionBudgetPressure = { stage, fraction, binding };
+  const rt = left(budget.maxTokens, tokens); if (rt !== undefined) { out.remainingTokens = rt; }
+  const ru = left(budget.maxTurns, usage.turns); if (ru !== undefined) { out.remainingTurns = ru; }
+  const rc = left(budget.maxToolCalls, usage.toolCalls); if (rc !== undefined) { out.remainingToolCalls = rc; }
+  const rm = left(budget.maxWallMs, usage.wallMs); if (rm !== undefined) { out.remainingMinutes = Math.floor(rm / 60_000); }
+  return out;
+}
+
+/** Mission usage including the turn that is still running. */
+export function liveMissionUsage(usage: MissionUsage, turn: { toolCalls: number; promptTokens: number; completionTokens: number; elapsedMs: number }): MissionUsage {
+  const n = (v: number) => (Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+  return {
+    ...usage,
+    // turns stays at the COMPLETED count, as in checkMissionBudget: the turn that
+    // is running was allowed to start, so it must not read as "turns exhausted".
+    toolCalls: usage.toolCalls + n(turn.toolCalls),
+    promptTokens: usage.promptTokens + n(turn.promptTokens),
+    completionTokens: usage.completionTokens + n(turn.completionTokens),
+    wallMs: usage.wallMs + n(turn.elapsedMs),
+  };
+}
+
+const STAGE_GUIDANCE: Record<MissionBudgetStage, string> = {
+  normal: 'Plan the work so the acceptance criteria fit well inside what remains.',
+  prioritise: 'More than half is spent: do the acceptance criteria that matter most first, and leave polish, ' +
+    'optional research and nice-to-haves until those pass.',
+  'wrap-up': 'The budget is nearly spent: start no new features, experiments or research. Bring what exists to a ' +
+    'working, verified state, then deliver with a short list of what is unfinished.',
+  exhausted: 'The budget is SPENT: make no more tool calls. Reply now with the final report — what works (with the ' +
+    'evidence), what is unfinished, and the next step — and stop. The mission will be paused after this reply.',
+};
+
+/**
+ * The controller's budget note for the model. `avgPromptPerCall` (when known)
+ * turns the token count into something a model can plan with: model calls left.
+ */
+export function missionBudgetNote(usage: MissionUsage, budget: MissionBudget, avgPromptPerCall?: number): string {
+  const p = missionBudgetPressure(usage, budget);
+  if (!p) { return ''; }
+  const fmt = (v: number) => v.toLocaleString('en-US');
+  const parts: string[] = [];
+  if (p.remainingTokens !== undefined) {
+    const calls = avgPromptPerCall && avgPromptPerCall > 0 ? ` (≈${fmt(Math.floor(p.remainingTokens / avgPromptPerCall))} model calls at the current prompt size)` : '';
+    parts.push(`${fmt(p.remainingTokens)} tokens${calls}`);
+  }
+  if (p.remainingTurns !== undefined) { parts.push(`${fmt(p.remainingTurns)} turns (this one included)`); }
+  if (p.remainingToolCalls !== undefined) { parts.push(`${fmt(p.remainingToolCalls)} tool calls`); }
+  if (p.remainingMinutes !== undefined) { parts.push(`${fmt(p.remainingMinutes)} min`); }
+  let note = `MISSION BUDGET (the controller pauses this mission when any limit is reached): ` +
+    `${Math.min(100, Math.round(p.fraction * 100))}% used, closest limit: ${p.binding}. Remaining: ${parts.join(', ')}.\n` +
+    STAGE_GUIDANCE[p.stage];
+  if (budget.maxStalledTurns > 0 && usage.stalledTurns > 0) {
+    note += `\n${usage.stalledTurns} turn(s) in a row changed nothing and produced no passing check ` +
+      `(the mission pauses at ${budget.maxStalledTurns}): change the approach instead of repeating it.`;
+  }
+  return note;
+}

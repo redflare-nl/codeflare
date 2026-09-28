@@ -54,6 +54,55 @@ window.CodeFlareUI = (() => {
   add('Budget', 'Budget', 'Budget', 'Budget');
   add('Memory', 'Geheugen', 'Mémoire', 'Speicher');
   add('Help', 'Hulp', 'Aide', 'Hilfe');
+  // Memory map (media/memoryMap.js)
+  add('Memory map', 'Geheugenkaart', 'Carte de la mémoire', 'Speicherkarte');
+  add('Loading the memory map…', 'Geheugenkaart laden…', 'Chargement de la carte…', 'Speicherkarte wird geladen…');
+  add('In every prompt', 'In elke prompt', 'Dans chaque prompt', 'In jedem Prompt');
+  add('Every turn starts with these, in this project.', 'Elke beurt begint hiermee, in dit project.', 'Chaque tour commence avec ceci, dans ce projet.', 'Jede Runde beginnt damit, in diesem Projekt.');
+  add('Automatically, when relevant', 'Automatisch, als het relevant is', 'Automatiquement, si pertinent', 'Automatisch, wenn relevant');
+  add('Up to 5 that match the request are added to the prompt.', 'Maximaal 5 die bij de vraag passen gaan mee in de prompt.', 'Jusqu’à 5 correspondant à la demande sont ajoutées au prompt.', 'Bis zu 5 passende werden dem Prompt hinzugefügt.');
+  add('Only on request', 'Alleen op verzoek', 'Uniquement sur demande', 'Nur auf Anfrage');
+  add('The agent sees these only when it calls recall_memory or list_skills itself.', 'De agent ziet dit alleen als hij zelf recall_memory of list_skills aanroept.', 'L’agent ne les voit que s’il appelle lui-même recall_memory ou list_skills.', 'Der Agent sieht dies nur, wenn er selbst recall_memory oder list_skills aufruft.');
+  add('Stored, not read back', 'Opgeslagen, niet teruggelezen', 'Stocké, jamais relu', 'Gespeichert, nicht zurückgelesen');
+  add('Written with record_landscape; nothing reads them back into a prompt yet.', 'Geschreven met record_landscape; nog niets leest ze terug in een prompt.', 'Écrits avec record_landscape ; rien ne les relit encore dans un prompt.', 'Mit record_landscape geschrieben; noch nichts liest sie in einen Prompt zurück.');
+  add('Night Shift', 'Nachtdienst', 'Équipe de nuit', 'Nachtschicht');
+  add('Night Shift picks its next goal from these.', 'De nachtdienst kiest hieruit zijn volgende doel.', 'L’équipe de nuit y choisit son prochain objectif.', 'Die Nachtschicht wählt hieraus ihr nächstes Ziel.');
+  add('Facts in every prompt', 'Feiten in elke prompt', 'Faits dans chaque prompt', 'Fakten in jedem Prompt');
+  add('Validated skills', 'Gevalideerde vaardigheden', 'Compétences validées', 'Validierte Fähigkeiten');
+  add('Experiences', 'Ervaringen', 'Expériences', 'Erfahrungen');
+  add('Candidate skills', 'Kandidaat-vaardigheden', 'Compétences candidates', 'Kandidaten-Fähigkeiten');
+  add('No experiments recorded yet.', 'Nog geen experimenten vastgelegd.', 'Aucune expérience enregistrée.', 'Noch keine Experimente gespeichert.');
+  add('No candidates.', 'Geen kandidaten.', 'Aucune candidate.', 'Keine Kandidaten.');
+  add('Nothing validated yet.', 'Nog niets gevalideerd.', 'Rien de validé pour l’instant.', 'Noch nichts validiert.');
+  add('reflection or save_skill', 'reflectie of save_skill', 'réflexion ou save_skill', 'Reflexion oder save_skill');
+  add('proven in a mission with tests', 'bewezen in een missie met tests', 'prouvée dans une mission avec tests', 'in einer Mission mit Tests bewiesen');
+  add('Facts (memory.md)', 'Feiten (memory.md)', 'Faits (memory.md)', 'Fakten (memory.md)');
+  add('No facts stored.', 'Geen feiten opgeslagen.', 'Aucun fait enregistré.', 'Keine Fakten gespeichert.');
+  add('Goals and acceptance criteria', 'Doelen en acceptatiecriteria', 'Objectifs et critères d’acceptation', 'Ziele und Akzeptanzkriterien');
+  add('No goals recorded.', 'Geen doelen vastgelegd.', 'Aucun objectif enregistré.', 'Keine Ziele gespeichert.');
+  add('Backlog', 'Backlog', 'Backlog', 'Backlog');
+  add('Backlog is empty.', 'Backlog is leeg.', 'Le backlog est vide.', 'Backlog ist leer.');
+  add('What the checks observed', 'Wat de controles zagen', 'Ce que les vérifications ont observé', 'Was die Prüfungen beobachtet haben');
+  add('Failed checks', 'Mislukte controles', 'Vérifications échouées', 'Fehlgeschlagene Prüfungen');
+  add('Summary', 'Samenvatting', 'Résumé', 'Zusammenfassung');
+  add('When to use', 'Wanneer te gebruiken', 'Quand l’utiliser', 'Wann verwenden');
+  add('Measured lift (with vs. without)', 'Gemeten effect (met vs. zonder)', 'Effet mesuré (avec vs. sans)', 'Gemessener Effekt (mit vs. ohne)');
+  add('Acceptance criteria', 'Acceptatiecriteria', 'Critères d’acceptation', 'Akzeptanzkriterien');
+  add('Decisions', 'Beslissingen', 'Décisions', 'Entscheidungen');
+  add('Select an item to see what is stored.', 'Kies een onderdeel om te zien wat er is opgeslagen.', 'Choisissez un élément pour voir ce qui est stocké.', 'Wähle einen Eintrag, um zu sehen, was gespeichert ist.');
+  add('Refresh', 'Vernieuwen', 'Actualiser', 'Aktualisieren');
+  add('This project', 'Dit project', 'Ce projet', 'Dieses Projekt');
+  add('stays in this workspace', 'blijft in deze werkmap', 'reste dans cet espace de travail', 'bleibt in diesem Arbeitsbereich');
+  add('No project storage in this window: open a folder to see what it learned.', 'Geen projectopslag in dit venster: open een map om te zien wat daar geleerd is.', 'Pas de stockage de projet dans cette fenêtre : ouvrez un dossier pour voir ce qu’il a appris.', 'Kein Projektspeicher in diesem Fenster: Öffne einen Ordner, um zu sehen, was dort gelernt wurde.');
+  add('Older experiences not drawn:', 'Oudere ervaringen niet getekend:', 'Expériences plus anciennes non affichées :', 'Ältere Erfahrungen nicht gezeigt:');
+  add('Agent memory', 'Agentgeheugen', 'Mémoire de l’agent', 'Agentenspeicher');
+  add('shared by all projects', 'gedeeld door alle projecten', 'partagée par tous les projets', 'von allen Projekten geteilt');
+  add('How each part reaches the agent', 'Hoe elk deel bij de agent komt', 'Comment chaque partie atteint l’agent', 'Wie jeder Teil den Agenten erreicht');
+  add('accepted', 'geaccepteerd', 'acceptée', 'akzeptiert');
+  add('inconclusive', 'onbeslist', 'non concluante', 'ergebnislos');
+  add('rejected', 'afgewezen', 'rejetée', 'abgelehnt');
+  add('some checks failed', 'sommige controles mislukt', 'certaines vérifications ont échoué', 'einige Prüfungen fehlgeschlagen');
+  add('Memory storage is unavailable in this window.', 'Geheugenopslag is niet beschikbaar in dit venster.', 'Le stockage de la mémoire n’est pas disponible dans cette fenêtre.', 'Speicher ist in diesem Fenster nicht verfügbar.');
   add('Language', 'Taal', 'Langue', 'Sprache');
   add('Light mode', 'Lichte modus', 'Mode clair', 'Heller Modus');
   add('Dark mode', 'Donkere modus', 'Mode sombre', 'Dunkler Modus');
@@ -102,6 +151,14 @@ window.CodeFlareUI = (() => {
     ['Maximale modeltijd (minuten)', 'Maximum model time (minutes)', 'Durée maximale du modèle (minutes)', 'Maximale Modellzeit (Minuten)'],
     ['Pauzeren na turns zonder voortgang', 'Pause after turns without progress', 'Suspendre après des tours sans progrès', 'Nach Durchläufen ohne Fortschritt pausieren'],
   ];
+  budgets.push(
+    ['Onbeperkt', 'Unlimited', 'Illimité', 'Unbegrenzt'],
+    ['Onbeperkt bij een lokaal model', 'Unlimited with a local model', 'Illimité avec un modèle local', 'Unbegrenzt bei einem lokalen Modell'],
+    ['Plafonds voor één autonome missie als geheel (alle turns, herstelrondes en teststap). Een missie die een plafond bereikt wordt gepauzeerd met de reden. Interactieve missies worden nooit begrensd.',
+      'Ceilings for one autonomous mission as a whole (all turns, repair rounds and the test step). A mission that reaches a ceiling is paused with the reason. Interactive missions are never limited.',
+      'Plafonds pour une mission autonome entière (tous les tours, rondes de réparation et étape de test). Une mission qui atteint un plafond est mise en pause avec la raison. Les missions interactives ne sont jamais limitées.',
+      'Obergrenzen für eine autonome Mission als Ganzes (alle Durchläufe, Reparaturrunden und Testschritt). Eine Mission, die eine Grenze erreicht, wird mit Begründung pausiert. Interaktive Missionen werden nie begrenzt.'],
+  );
   budgets.forEach(([nl, en, fr, de]) => dictionary.set(nl, [en, nl, fr, de]));
   add('Mission limits', 'Missielimieten', 'Limites de mission', 'Missionslimits');
   add('Limits apply to the whole autonomous mission, including recovery and tests. 0 means unlimited. The mission pauses when a limit is reached. Interactive missions are not limited.', 'Limieten gelden voor de hele autonome missie, inclusief herstel en tests. 0 betekent onbeperkt. Bij het bereiken van een limiet pauzeert de missie. Interactieve missies zijn niet begrensd.', 'Les limites couvrent toute la mission autonome, reprises et tests inclus. 0 signifie illimité. La mission est suspendue à la limite. Les missions interactives ne sont pas limitées.', 'Limits gelten für die gesamte autonome Mission inklusive Wiederherstellung und Tests. 0 bedeutet unbegrenzt. Beim Erreichen eines Limits pausiert die Mission. Interaktive Missionen sind nicht begrenzt.');
@@ -291,7 +348,7 @@ window.CodeFlareUI = (() => {
         const original = previous && previous.rendered === current ? previous.original : current;
         const key = original.trim(); const value = key ? original.replace(key, () => t(key)) : original;
         originals.set(node, { original, rendered: value }); if (current !== value) node.textContent = value;
-      } else if (node.nodeType === Node.ELEMENT_NODE && !node.matches('input, textarea, #ui-language, .plan-count, #model-chip')) {
+      } else if (node.nodeType === Node.ELEMENT_NODE && !node.matches('input, textarea, #ui-language, .plan-count, #model-chip, .mm-data')) {
         [...node.childNodes].forEach(translateNode);
       }
     }

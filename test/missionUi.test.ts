@@ -83,6 +83,20 @@ function footerHarness() {
 }
 
 describe('live mission footer', () => {
+  it('suppresses planned tests and empty feedback, then displays actual test results', () => {
+    const ui = footerHarness();
+    ui.run("renderMission({status:'running',phase:'build',testStatus:'pending',agents:[],transitions:[]});");
+    expect(ui.run('missionTests.hidden')).toBe(true);
+    expect(ui.run('missionTests.textContent')).toBe('');
+    expect(ui.run('missionActivity.hidden')).toBe(true);
+    expect(ui.run('missionDetails.hidden')).toBe(true);
+    ui.run("renderMission({status:'running',phase:'verify',activity:'Checking the build',testStatus:'running'});");
+    expect(ui.run('missionTests.hidden')).toBe(false);
+    expect(ui.run('missionActivity.textContent')).toBe('Checking the build');
+    ui.run("renderMission({status:'completed',phase:'deliver',testStatus:'passed'});");
+    expect(ui.run('missionTests.dataset.status')).toBe('passed');
+    expect(ui.run('missionTests.textContent')).toBe('Tests geslaagd');
+  });
   it('keeps Stop available after the implementation stream ends and throughout the separate test stage', () => {
     const ui = footerHarness();
     ui.mission('running', 'build');

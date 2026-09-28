@@ -4,10 +4,16 @@ export function testAuthorPrompt(task: string, files: string[]): string {
     'Read existing tests and project configuration. Identify observable acceptance criteria, normal cases, ' +
     'edge cases and regressions. Write missing meaningful unit/integration tests using the existing framework. ' +
     'Only test files may be edited; do not change production code, dependencies, test configuration, ' +
-    'or weaken existing assertions. Report implementation defects for the coordinator to repair. ' +
+    'or weaken existing assertions. You may CREATE new test files (e.g. under tests/), not only edit existing ones. ' +
+    'NO TEST FRAMEWORK in the project (for example a single index.html page or a plain script)? Then use ' +
+    "Node's built-in runner, which needs no install: write tests/*.test.mjs with node:test and node:assert, " +
+    'and use TEST_COMMAND: node --test tests/. For code inside an HTML file, read the file, extract the ' +
+    'script and run it in node:vm with minimal stubs for the browser objects it touches (canvas context, ' +
+    'requestAnimationFrame, localStorage, event listeners), then test its logic: state after start/restart, ' +
+    'scoring, collisions, input handling. Report implementation defects for the coordinator to repair. ' +
     'Do not fabricate test results: execution is performed by the coordinator after you finish. ' +
-    'In your RESULT block include TEST_COMMAND: one existing project test command, without shell chaining, ' +
-    'watch mode, or no-tests/pass flags; use none if there is no runnable framework. ' +
+    'In your RESULT block include TEST_COMMAND: one project test command, without shell chaining, ' +
+    'watch mode, or no-tests/pass flags; use none only if no test can run at all. ' +
     'Explain remaining coverage gaps in OPEN. Existing adequate tests may be reused. ' +
     'A build, linter, screenshot, or echo command is not a test suite.';
 }

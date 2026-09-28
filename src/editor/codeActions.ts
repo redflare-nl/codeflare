@@ -34,7 +34,7 @@ export function registerCodeActions(
         const language = editor.document.languageId;
 
         // Focus the chat panel
-        vscode.commands.executeCommand('codeflare.chatView.focus');
+        chatProvider.ensurePanel();
 
         // Send the action
         chatProvider.sendCodeAction(action, text, filePath, language);
