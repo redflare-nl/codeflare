@@ -11,6 +11,9 @@ import {
 import { BacklogItem, BacklogStatus, describeBacklog, goalPrompt } from '../engine/backlog';
 import { setCalibrationNote } from '../llm/prompts';
 import { readTurnMetrics } from '../utils/metrics';
+import { getServerSlots } from '../utils/serverInfo';
+import { TurnPruner } from '../llm/turnPruning';
+import { effectiveAgentLimit } from '../engine/agentPool';
 import { buildSystemPrompt, buildMessages, CodeAction, setProjectInstructions, setProjectMap, setProjectStacks, setProjectMemory, setGroundingNote, groundingConcerns, setReviewMode, looksLikeReviewRequest, setProblemShape, classifyProblem } from '../llm/prompts';
 import { gatherContext, resolveActiveEditor } from '../editor/contextGatherer';
 import { hasEditBlocks, parseEditBlocks, applyEditsWithDiff, getPreviewProvider } from '../editor/editApplier';
@@ -517,6 +520,35 @@ export class ChatViewProvider {
     return { client: this._judgeClient, independent: true, label: resolved.label };
   }
 
+  private _slotCapLogged = false;
+
+  /** Run one in-turn pruning check; on a pass, rewrite the list in place and record it. */
+  private _applyTurnPruning(pruner: TurnPruner | undefined, messages: ChatMessage[], who: string): void {
+    const pass = pruner?.maybePrune(messages);
+    if (!pass) { return; }
+    messages.splice(0, messages.length, ...pass.messages);
+    if (this._turnMetrics) {
+      this._turnMetrics.prunePasses++;
+      this._turnMetrics.prunedToolResults += pass.results;
+      this._turnMetrics.prunedChars += pass.savedChars;
+    }
+    log(`Context pruned (${who}): ${pass.results} tool result(s), ~${pass.tokensBefore - pass.tokensAfter} tokens ` +
+      `(${pass.tokensBefore} → ${pass.tokensAfter})`);
+    this._postMessage({ type: 'toolActivity', label: `context pruned: ${pass.results} finished/superseded tool result(s), ~${Math.round((pass.tokensBefore - pass.tokensAfter) / 1000)}k tokens` });
+  }
+
+  /** Concurrent subagents: the setting, capped by the local server's parallel slots. */
+  private _agentLimit(): number {
+    const cfg = getConfig();
+    const slots = cfg.provider === 'local' ? getServerSlots() : undefined;
+    const limit = effectiveAgentLimit(cfg.maxParallelAgents, slots);
+    if (limit < cfg.maxParallelAgents && !this._slotCapLogged) {
+      this._slotCapLogged = true;
+      log(`Parallel agents capped at ${limit} (setting ${cfg.maxParallelAgents}): the server offers ${slots} slot(s)`);
+    }
+    return limit;
+  }
+
   /** The autonomous mission budget: shipped defaults with the user's per-field overrides. */
   private _missionBudget(): MissionBudget {
     return resolveMissionBudget(DEFAULT_MISSION_BUDGET, getConfig().missionBudget);
@@ -885,7 +917,7 @@ export class ChatViewProvider {
    */
   private async _runOneSubagent(task: string, client: VLLMClient, tag: string, testsOnly = false): Promise<SubagentResult> {
     const id = `agent-${++this._agentSequence}`;
-    this._agentPool ??= new AgentPool(getConfig().maxParallelAgents);
+    this._agentPool ??= new AgentPool(this._agentLimit());
     const update = (status: 'queued' | 'running' | 'success' | 'partial' | 'failed' | 'interrupted', activity: string) => {
       if (!this._mission) { return; }
       const previous = this._mission.agents.find(a => a.id === id);
@@ -957,9 +989,11 @@ export class ChatViewProvider {
     // Register so Stop can abort this subagent's in-flight request too.
     this._subagentClients.add(client);
     try {
+    const pruner = config.contextCompaction ? new TurnPruner(getContextSize() ?? 32768) : undefined;
     for (let step = 0; step < config.agentMaxSteps; step++) {
       if (this._stopRequested) { break; }
       let hadError = false;
+      this._applyTurnPruning(pruner, messages, `subagent ${tag}`);
       const result = await client.streamChat(messages, {
         onToken: () => { /* headless */ },
         onThinking: () => { /* headless */ },
@@ -1818,7 +1852,7 @@ export class ChatViewProvider {
     this._turnFailed = false;
     this._turnIncomplete = false;
     this._missionPaused = false;
-    this._agentPool = new AgentPool(cfg0.maxParallelAgents);
+    this._agentPool = new AgentPool(this._agentLimit());
     this._agentOwners.clear();
     this._skillTrials.clear();
     this._skillHoldouts.clear();
@@ -2631,6 +2665,9 @@ export class ChatViewProvider {
     const planDrivenTurn = this._approvalTurn ||
       /^(continue|resume|proceed|go on|keep going|ga door|ga verder|verder|doorgaan)\b/i.test(userMessage.trim());
 
+    // In-turn pruning (llm/turnPruning.ts): cache-aware, so it rewrites the running
+    // message list only when the turn has grown enough to be worth it.
+    const pruner = config.contextCompaction ? new TurnPruner(getContextSize() ?? 32768) : undefined;
     try {
       for (let step = 0; step < budget; step++) {
         stepsUsed = step + 1;
@@ -2655,6 +2692,7 @@ export class ChatViewProvider {
         let stepText = '';
         let lastProgress = 0;
         let lastProgressLog = 0;
+        this._applyTurnPruning(pruner, messages, 'agent');
         // Verify-only turns (Prove It / Break My Solution) run on the judge when
         // one is configured: the model that did the work must not grade it.
         const result = await (this._verifyOnlyTurn ? this._judge().client : this._client).streamChat(messages, {
@@ -2707,6 +2745,10 @@ export class ChatViewProvider {
           if (this._turnMetrics) {
             this._turnMetrics.promptTokens += result.stats.promptTokens;
             this._turnMetrics.completionTokens += result.stats.completionTokens;
+            // The largest single prompt this turn: what in-turn pruning is meant
+            // to keep flat, and what a local model's window has to hold.
+            this._turnMetrics.peakCallPromptTokens = Math.max(this._turnMetrics.peakCallPromptTokens, result.stats.promptTokens);
+            this._turnMetrics.modelCalls++;
           }
         }
 

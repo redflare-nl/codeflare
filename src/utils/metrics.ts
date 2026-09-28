@@ -19,6 +19,15 @@ export interface TurnMetrics {
   // True when this model's measured over-claim record made a behavioural check
   // mandatory for the turn (see engine/calibration.ts).
   calibrationApplied?: boolean;
+  // In-turn pruning (llm/turnPruning.ts): passes run, tool results replaced or
+  // shortened, and characters removed from the running prompt.
+  prunePasses: number;
+  prunedToolResults: number;
+  prunedChars: number;
+  // Per-call prompt size: calls that reported token usage, and the largest one.
+  // promptTokens / modelCalls = average prompt per call.
+  modelCalls: number;
+  peakCallPromptTokens: number;
   rounds: number;              // _streamResponse invocations (fix-rounds included)
   steps: number;               // model calls across all rounds
   toolCalls: number;
@@ -69,6 +78,7 @@ export function newTurnMetrics(model: string, provider: string): TurnMetrics {
     subagentBatches: 0, subagentTasks: 0, subagentFileConflicts: 0,
     subagentTokens: 0, subagentParallelMs: 0, subagentSequentialMs: 0,
     promptTokens: 0, completionTokens: 0, filesChanged: 0,
+    prunePasses: 0, prunedToolResults: 0, prunedChars: 0, modelCalls: 0, peakCallPromptTokens: 0,
     outcome: 'incomplete',
   };
 }

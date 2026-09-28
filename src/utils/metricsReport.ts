@@ -43,6 +43,12 @@ interface Agg {
   completionTokens: number;
   filesChanged: number;
   durationMs: number;
+  // Context efficiency (for the in-turn pruning / delegation comparison).
+  modelCalls: number;
+  peakCallPromptTokens: number;
+  prunePasses: number;
+  prunedToolResults: number;
+  prunedChars: number;
 }
 
 function emptyAgg(model: string, provider: string): Agg {
@@ -56,6 +62,7 @@ function emptyAgg(model: string, provider: string): Agg {
     subagentBatches: 0, subagentTasks: 0, subagentFileConflicts: 0,
     subagentTokens: 0, subagentParallelMs: 0, subagentSequentialMs: 0,
     promptTokens: 0, completionTokens: 0, filesChanged: 0, durationMs: 0,
+    modelCalls: 0, peakCallPromptTokens: 0, prunePasses: 0, prunedToolResults: 0, prunedChars: 0,
   };
 }
 
@@ -121,6 +128,12 @@ function buildReport(aggs: Agg[], totalTurns: number, skipped: number): string {
     }
     lines.push(`- Cost: ~${avg(a.promptTokens, a.turns, 0)} prompt + ${avg(a.completionTokens, a.turns, 0)} ` +
       `completion tokens per turn; ${a.turns ? fmtDuration(a.durationMs / a.turns) : '—'} average wall-clock`);
+    // Only turns recorded after per-call accounting existed carry modelCalls.
+    if (a.modelCalls > 0) {
+      lines.push(`- Context: ~${Math.round(a.promptTokens / a.modelCalls)} prompt tokens per model call on average, ` +
+        `largest single prompt ${a.peakCallPromptTokens}; in-turn pruning ran ${a.prunePasses} pass(es), ` +
+        `shortening ${a.prunedToolResults} tool result(s) (~${Math.round(a.prunedChars / 3.5)} tokens removed from the running prompt).`);
+    }
   }
   lines.push('');
   lines.push('_To benchmark: run the SAME task with different models (switch the model in the panel), ' +
@@ -193,6 +206,16 @@ export async function showMetricsReport(): Promise<void> {
     a.completionTokens += rec.completionTokens || 0;
     a.filesChanged += rec.filesChanged || 0;
     a.durationMs += rec.durationMs || 0;
+    // Older lines have no call count; count calls only where they exist. (The
+    // per-call average still uses all prompt tokens, so it is an upper bound
+    // until the log holds mostly new turns.)
+    if (rec.modelCalls > 0) {
+      a.modelCalls += rec.modelCalls;
+      a.peakCallPromptTokens = Math.max(a.peakCallPromptTokens, rec.peakCallPromptTokens || 0);
+    }
+    a.prunePasses += rec.prunePasses || 0;
+    a.prunedToolResults += rec.prunedToolResults || 0;
+    a.prunedChars += rec.prunedChars || 0;
     byModel.set(key, a);
   }
 

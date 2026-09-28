@@ -4,6 +4,7 @@ import { getCapabilitiesSummary } from '../utils/capabilities';
 import { getConfig } from '../utils/config';
 import { describeApiServices } from '../utils/apiServices';
 import { discoveredPath } from '../utils/executables';
+import { compactToolResults } from './turnPruning';
 import { ProblemShape } from './problemShape';
 
 export { ProblemShape, classifyProblem } from './problemShape';
@@ -700,69 +701,12 @@ function trimHistory(history: ChatMessage[], max: number): ChatMessage[] {
 }
 
 /**
- * Trim token overhead from the outgoing history without breaking tool pairing:
- * replace the CONTENT of tool results that are superseded (the same read/list/
- * search ran again later) or stale (a file was edited after it was read) with a
- * short stub. Returns copies — the stored history is never mutated.
+ * Trim token overhead from the outgoing history without breaking tool pairing.
+ * The rules (superseded / stale tool results) live in llm/turnPruning.ts so the
+ * stored history and the running turn are pruned by ONE implementation.
  */
 function compactHistory(history: ChatMessage[]): ChatMessage[] {
-  // tool_call_id -> { name, key, path } from the assistant tool_calls.
-  const callInfo = new Map<string, { name: string; key: string; path?: string }>();
-  for (const m of history) {
-    if (m.role === 'assistant' && m.tool_calls) {
-      for (const tc of m.tool_calls) {
-        let args: any = {};
-        try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* ignore */ }
-        const path = args.path ?? args.destination ?? args.source;
-        callInfo.set(tc.id, {
-          name: tc.function.name,
-          key: `${tc.function.name}:${tc.function.arguments || ''}`,
-          path,
-        });
-      }
-    }
-  }
-
-  // Last position of each identical call, and edits applied per file (by index).
-  const lastIdxForKey = new Map<string, number>();
-  const editIndexByPath = new Map<string, number[]>();
-  history.forEach((m, i) => {
-    if (m.role === 'tool' && m.tool_call_id) {
-      const info = callInfo.get(m.tool_call_id);
-      if (info) { lastIdxForKey.set(info.key, i); }
-    }
-    if (m.role === 'assistant' && m.tool_calls) {
-      for (const tc of m.tool_calls) {
-        if (tc.function.name === 'edit_file' || tc.function.name === 'create_file' || tc.function.name === 'move_file') {
-          let a: any = {};
-          try { a = JSON.parse(tc.function.arguments || '{}'); } catch { /* ignore */ }
-          const p = a.path ?? a.destination;
-          if (p) { editIndexByPath.set(p, [...(editIndexByPath.get(p) || []), i]); }
-        }
-      }
-    }
-  });
-
-  return history.map((m, i) => {
-    if (m.role !== 'tool' || !m.tool_call_id) { return m; }
-    const info = callInfo.get(m.tool_call_id);
-    if (!info) { return m; }
-
-    // A newer identical call ran later → this result is redundant.
-    const last = lastIdxForKey.get(info.key);
-    if (last !== undefined && last > i) {
-      return { ...m, content: `[superseded: a newer ${info.name} result appears later in this conversation]` };
-    }
-
-    // A read whose file was edited afterwards → its content is stale.
-    if (info.name === 'read_file' && info.path) {
-      const edits = editIndexByPath.get(info.path) || [];
-      if (edits.some(idx => idx > i)) {
-        return { ...m, content: `[stale: ${info.path} was modified after this read — re-read it if you need the current content]` };
-      }
-    }
-    return m;
-  });
+  return compactToolResults(history);
 }
 
 export function buildMessages(

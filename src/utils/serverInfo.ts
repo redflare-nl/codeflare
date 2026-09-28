@@ -9,9 +9,22 @@ import { log } from './logger';
  */
 
 let contextSize: number | undefined;
+// Parallel decoding slots the server offers (llama.cpp `-np`, /props total_slots).
+// More concurrent requests than slots only queue on the server and slow each other.
+let serverSlots: number | undefined;
 
 export function getContextSize(): number | undefined {
   return contextSize;
+}
+
+export function getServerSlots(): number | undefined {
+  return serverSlots;
+}
+
+/** total_slots from a llama.cpp /props body, or undefined when absent/implausible. */
+export function parseServerSlots(data: unknown): number | undefined {
+  const n = (data as any)?.total_slots;
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 256 ? n : undefined;
 }
 
 /**
@@ -47,6 +60,11 @@ export async function detectContextSize(endpoint: string): Promise<void> {
     if (typeof n === 'number' && n > 0) {
       contextSize = n;
       log(`Detected model context window: ${n} tokens`);
+    }
+    const slots = parseServerSlots(data);
+    if (slots !== undefined && slots !== serverSlots) {
+      serverSlots = slots;
+      log(`Server offers ${slots} parallel slot(s); concurrent agents are capped to that`);
     }
   } catch {
     // Not a llama.cpp server, or unreachable — leave undefined.

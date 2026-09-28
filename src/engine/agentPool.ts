@@ -10,6 +10,17 @@ interface QueuedAgent {
  * instance to share its limit. Active work is cancelled by its own abort signal;
  * cancelling this queue never pretends that a running worker has released a slot.
  */
+/**
+ * How many subagents may run at once: the user's setting, capped by the parallel
+ * slots the server actually has. A local llama.cpp with 4 slots gains nothing
+ * from 32 concurrent requests — 28 would wait on the server while holding their
+ * own context. Unknown slots (remote providers) leave the setting as is.
+ */
+export function effectiveAgentLimit(configured: number, serverSlots?: number): number {
+  const base = Number.isFinite(configured) ? Math.max(1, Math.min(32, Math.floor(configured))) : 1;
+  return serverSlots !== undefined && Number.isInteger(serverSlots) && serverSlots >= 1 ? Math.min(base, serverSlots) : base;
+}
+
 export class AgentPool {
   private readonly concurrency: number;
   private running = 0;
