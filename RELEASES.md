@@ -17,6 +17,16 @@ Reload the window afterwards (**Developer: Reload Window**) to activate it.
 
 ---
 
+## v1.43.0
+
+Faster turns on request, and a chat panel that shows what it is doing.
+
+- **Fast mode.** A new *Snelle modus* toggle in the chat input (`codeflare.fastMode`, default off) asks the model to reason less per call, using each provider's own switch and only where the target accepts it: `enable_thinking=false` for local Qwen3-style templates (plus `reasoning_effort=low` for gpt-oss-style servers), `reasoning_effort=low` for OpenAI o-series and GPT-5 models, and `output_config.effort=low` for Anthropic models that support effort. A provider or model that would reject an unknown parameter gets nothing, so turning it on cannot break a call. It also skips the adaptive reasoning-discipline block in the prompt. Faster and cheaper; less thorough on hard problems.
+- **Visible settings.** A header bar with a labelled *Settings* button and a model chip (provider · model, with a warning when an API token is missing); both open the settings dialog. New command **CodeFlare: Open Settings**, also as a gear in the editor title bar while the chat is active. Escape closes the dialog.
+- **Plan as a side column.** The plan is a column beside the transcript with its own scroll (stacked above the chat in narrow panels) instead of a floating overlay. It collapses to a thin rail, remembers that state, and a header *Plan* button brings it back. Stable order with step numbers, a *Nu:* line for the current step, theme colours that work in light themes, an active-step marker that scrolls into view, and indent guides for sub-steps. A pending plan review shows *Voer plan uit* at the bottom of the column; a finished plan shows its done state briefly before stepping aside. Copy/export writes the plan from its data with `[x]`/`[>]`/`[ ]` markers.
+
+---
+
 ## v1.42.1
 
 **Hotfix — install this instead of v1.42.0.** In v1.42.0 every model call failed with *"Maximum call stack size exceeded"*: the client's settings accessor called itself after a blanket rename during the independent-judge work. No test exercised a client method, so it shipped. Fixed, and a regression test now constructs the client and reads its configuration. Nothing else changed.
