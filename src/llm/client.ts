@@ -4,6 +4,7 @@ import { getContextSize, setContextSize } from '../utils/serverInfo';
 import { log } from '../utils/logger';
 import { ToolDefinition } from './tools';
 import { estimatePromptTokens, fitToContextWindow, parseServerContextSize } from './contextFit';
+import { fastModeParams } from './fastMode';
 
 // Auto mode (maxTokens <= 0): derive the output cap from the context window,
 // bounded by this ceiling so a single generation can't grind for many minutes.
@@ -297,6 +298,7 @@ export class VLLMClient {
         max_tokens: effectiveMaxTokens(messages, maxTokens),
         temperature: 0.2,
         stream: false,
+        ...fastModeParams(config.provider, config.model, config.fastMode),
       }),
       // Scale the deadline to prompt size like the streaming path does (~150
       // tok/s prefill). Compaction prompts are the largest the extension sends;
@@ -392,6 +394,7 @@ export class VLLMClient {
           temperature: config.temperature,
           stream: true,
           ...(tools && tools.length ? { tools, tool_choice: 'auto' } : {}),
+          ...fastModeParams(config.provider, config.model, config.fastMode),
         }),
         signal: this.abortController.signal,
       });
@@ -654,6 +657,7 @@ export class VLLMClient {
       max_tokens: effectiveMaxTokens(messages, maxTokens),
       messages: amsgs,
       stream: false,
+      ...fastModeParams(config.provider, config.model, config.fastMode),
     };
     if (system) { body.system = system; }
     const resp = await fetch(`${config.endpoint}/v1/messages`, {
@@ -728,6 +732,7 @@ export class VLLMClient {
       max_tokens: effectiveMaxTokens(messages, config.maxTokens),
       messages: amsgs,
       stream: true,
+      ...fastModeParams(config.provider, config.model, config.fastMode),
     };
     if (system) { body.system = system; }
     const atools = toAnthropicTools(tools);

@@ -212,13 +212,13 @@
   const autonomyOptions = textElement('div', 'autonomy-options');
   autonomyOptions.setAttribute('role', 'group');
   autonomyOptions.setAttribute('aria-label', 'Opties voor de volgende opdracht');
-  function createMissionOption(id, text, key) {
+  function createMissionOption(id, text, key, hint) {
     const label = textElement('label', 'autonomy-option');
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.id = id;
     label.append(input, textElement('span', '', text));
-    label.title = 'Instelling voor de volgende opdracht; wordt onthouden.';
+    label.title = hint || 'Instelling voor de volgende opdracht; wordt onthouden.';
     autonomyOptions.appendChild(label);
     input.addEventListener('change', () => {
       lastConfig[key] = input.checked;
@@ -229,6 +229,8 @@
   }
   const autonomousModeInput = createMissionOption('mission-autonomous', 'Autonoom uitvoeren', 'autonomousMode');
   const autoTestInput = createMissionOption('mission-auto-test', 'Tests schrijven en uitvoeren', 'autoTest');
+  const fastModeInput = createMissionOption('mission-fast', 'Snelle modus', 'fastMode',
+    'Minder nadenken per stap: sneller en goedkoper, minder grondig bij lastige problemen. Wordt onthouden.');
   inputArea.prepend(autonomyOptions);
 
   function syncMissionOptions() {
@@ -237,6 +239,7 @@
     autoTestInput.disabled = autonomousModeInput.checked;
     autoTestInput.title = autonomousModeInput.checked
       ? 'Tests zijn standaard inbegrepen bij autonoom uitvoeren.' : 'Een aparte testopdracht na de implementatie.';
+    fastModeInput.checked = lastConfig.fastMode === true;
   }
 
   // ── Markdown rendering ──────────────────────────────
@@ -1380,7 +1383,7 @@
 
   let lastConfig = {
     endpoint: '', model: '', hasToken: false, trustedCommands: [], confirmCommands: true,
-    autonomousMode: false, autoTest: false, maxParallelAgents: 32,
+    autonomousMode: false, autoTest: false, fastMode: false, maxParallelAgents: 32,
   };
 
   const agentsConfigTab = textElement('button', 'config-tab', 'Agents');
@@ -1569,6 +1572,7 @@
       provider, endpoint, model, trustedCommands, confirmCommands,
       autonomousMode: autonomousModeInput.checked,
       autoTest: lastConfig.autoTest === true,
+      fastMode: fastModeInput.checked,
       maxParallelAgents: Number(agentLimitInput.value),
     };
     // Only send the token when the user typed something, so an empty field
