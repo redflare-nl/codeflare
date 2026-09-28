@@ -2030,9 +2030,12 @@ export class ChatViewProvider {
     // V10 adaptive reasoning: inject proportional problem-solving discipline for
     // the turn's problem shape (debug/perf/puzzle/architecture). Skipped for
     // advisory turns (the review block owns those) and whenever no strong signal
-    // fires — so trivial edits pay nothing and stay fast. Fast mode skips it
-    // outright: the user asked for less deliberation, not more.
-    setProblemShape(isReview || getConfig().fastMode ? null : classifyProblem(text));
+    // fires — so trivial edits pay nothing and stay fast. Fast mode skips it —
+    // the user asked for less deliberation — EXCEPT an invention brief: with
+    // thinking off, the written-out concept shortlist is the only place the
+    // model ever weighs an alternative to its single most likely idea.
+    const shape = isReview ? null : classifyProblem(text);
+    setProblemShape(getConfig().fastMode && shape !== 'create' ? null : shape);
     const learnedContext = await this._loadSkillContext(this._turnRequest);
     const systemPrompt = buildSystemPrompt(context) + '\n' + learnedContext + (this._mission?.autonomous
       ? '\n\nAUTONOMOUS MISSION: Define observable acceptance criteria, examine the existing project, and research only material unknowns. ' +
@@ -3508,6 +3511,9 @@ export class ChatViewProvider {
 
     for (const rel of candidates) {
       const clean = rel.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+      // The write set holds every file the turn touched (orbit.html, test.js…);
+      // only meshes belong to this gate.
+      if (!/\.stl$/i.test(clean)) { continue; }
       if (!clean || clean.startsWith('/') || /^[a-zA-Z]:/.test(clean) || clean.includes('..')) { continue; }
       const uri = vscode.Uri.joinPath(root, clean);
       if (seen.has(uri.toString())) { continue; }

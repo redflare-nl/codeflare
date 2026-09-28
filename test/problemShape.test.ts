@@ -83,6 +83,32 @@ describe('classifyProblem — adaptive reasoning depth', () => {
     }
   });
 
+  // Invention briefs → diverge (concept shortlist + originality check) first.
+  describe('detects open-ended invention', () => {
+    for (const req of [
+      'Maak een origineel HTML-spel voor mobiel. Bedenk zelf het concept. Optimaliseer voor snelle laadtijd.',
+      'Make an original one-button game, not a Flappy Bird clone, and optimize it for fast loading',
+      'Come up with a name and logo for my bakery',
+      'Invent a new board game mechanic and build a prototype',
+      'Verzin een verhaal voor het level en bouw het',
+      'Build a game with its own identity where the player fails fast and retries',
+    ]) {
+      it(`→ create: "${req}"`, () => {
+        expect(classifyProblem(req)).toBe('create');
+      });
+    }
+    for (const [req, shape] of [
+      ['Optimize the original game loop', 'perf'],
+      ['Restore the original design of the header', null],
+      ['Fix the crash in the original game', 'debug'],
+      ['What is the original author of this file?', null],
+    ] as const) {
+      it(`not create: "${req}"`, () => {
+        expect(classifyProblem(req)).toBe(shape);
+      });
+    }
+  });
+
   // Ordering guarantee: a perf signal wins over a co-occurring debug signal,
   // because performance work demands the more specific measure-first discipline.
   it('prefers perf over debug when both cues are present', () => {

@@ -180,6 +180,13 @@ describe('analyzeStl — rejects non-STL input', () => {
   it('returns null for binary junk too short to hold a header', () => {
     expect(analyzeStl(new Uint8Array(Buffer.alloc(50, 0xff)))).toBeNull();
   });
+
+  it('returns null for an HTML or JS file (was parsed as a garbage TRUNCATED mesh)', () => {
+    const html = '<!DOCTYPE html>\n<html><head><title>ORBIT</title></head><body><canvas id="c"></canvas>\n' +
+      '<script>const orbitR = 120; function loop(){ requestAnimationFrame(loop); }</script></body></html>\n'.repeat(40);
+    expect(analyzeStl(new TextEncoder().encode(html))).toBeNull();
+    expect(analyzeStl(new TextEncoder().encode('// test_gameplay.js\n' + 'console.log("ok");\n'.repeat(20)))).toBeNull();
+  });
 });
 
 describe('describeStl', () => {

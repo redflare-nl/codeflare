@@ -739,7 +739,7 @@
           "type": "boolean"
         },
         "codeflare.fastMode": {
-          "description": "Fast mode: ask the model to reason less per call (thinking off for local Qwen3-style templates, low reasoning effort for OpenAI reasoning models and Anthropic) and skip the extra problem-solving guidance in the prompt. Faster and cheaper; less thorough on hard problems.",
+          "description": "Fast mode: ask the model to reason less per call (thinking off for local Qwen3-style templates, low reasoning effort for OpenAI reasoning models and Anthropic) and skip the extra problem-solving guidance in the prompt (except the concept-shortlist step for requests to invent something original). Faster and cheaper; less thorough on hard problems.",
           "default": false,
           "type": "boolean"
         },

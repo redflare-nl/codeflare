@@ -191,7 +191,25 @@ export function analyzeStl(bytes: Uint8Array): StlStats | null {
     return s;
   }
   if (bytes.length < 84) { return null; }
+  if (looksLikeText(bytes)) { return null; }
   return parseBinary(bytes);
+}
+
+/**
+ * A binary STL whose header count does not match its length is either a
+ * truncated export or not an STL at all. Triangle data is float32, which is
+ * full of control bytes; an HTML/JS/text file has none. Without this check any
+ * text file of 84+ bytes "parsed" as a garbage mesh (bbox 1e+37, TRUNCATED).
+ */
+function looksLikeText(bytes: Uint8Array): boolean {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (84 + dv.getUint32(80, true) * 50 === bytes.length) { return false; }
+  const end = Math.min(bytes.length, 84 + 4096);
+  for (let i = 84; i < end; i++) {
+    const b = bytes[i];
+    if (b < 0x09 || (b > 0x0d && b < 0x20) || b === 0x7f) { return false; }
+  }
+  return true;
 }
 
 /**

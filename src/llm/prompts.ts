@@ -199,6 +199,30 @@ function approachBlock(): string {
     `least cost. Think first for the hard part; for anything genuinely simple, just ` +
     `do it. Don't manufacture ceremony.\n`;
 
+  if (problemShape === 'create') {
+    // Measured failure this answers: the same brief, twice, in two fresh
+    // projects, produced the same game — the model's single most likely idea,
+    // chosen before any research could influence it.
+    return head +
+      `This asks you to INVENT something original. Your first idea is the most probable ` +
+      `one — the idea any model would produce for this brief — so it is the baseline to ` +
+      `beat, not the answer:\n` +
+      `- Before building, write down at least 5 genuinely different concepts: a different ` +
+      `core mechanic or verb each, not reskins of one idea. Name your first idea and the ` +
+      `genre's stock answers explicitly, and only keep them if they win on the merits.\n` +
+      (cfg.webAccess
+        ? `- Research concrete examples, not general "principles" articles: look up ` +
+          `successful works in this space and what makes them work. Then, for each ` +
+          `concept on your shortlist, web_search whether it already exists. A concept ` +
+          `that turns out to be a known work is not original — change it or drop it.\n`
+        : `- Check each shortlisted concept against well-known existing works you know of; ` +
+          `a concept that is a known work under a new coat is not original.\n`) +
+      `- Choose against the brief's own criteria and say why the winner beats the ` +
+      `runners-up. Record the chosen concept, the rejected ones and the reason in the ` +
+      `acceptance criteria (record_landscape), so later rounds keep building the SAME idea.\n` +
+      `- Only then build the smallest playable/usable version, and judge it against those ` +
+      `criteria with real checks before polishing.\n\n`;
+  }
   if (problemShape === 'debug') {
     return head +
       `This is a debugging task, so the cause is uncertain until shown:\n` +

@@ -1,0 +1,31 @@
+Maak een origineel HTML-spel dat primair geschikt is voor mobiele telefoons.
+
+Het spel moet met slechts één knop / één soort aanraking volledig te bedienen zijn en de potentie hebben om net zo verslavend, toegankelijk en direct begrijpelijk te zijn als Flappy Bird — maar het mag geen Flappy Bird-kloon of simpele variant daarop zijn.
+
+Bedenk zelf het concept, de spelmechaniek, progression, scoring, audiovisuele stijl en technische aanpak.
+
+Onderzoek waar nodig wat succesvolle one-button mobiele games leuk en verslavend maakt. Gebruik die inzichten om een eigen concept te bedenken.
+
+Voor graphics en assets mag je PixLab gebruiken. De benodigde API-key/configuratie kun je vinden in:
+
+C:\Projects\games\bonanza
+
+Werk autonoom.
+
+Stel zelf acceptance criteria op, bouw een speelbare versie, test hem daadwerkelijk, beoordeel kritisch of het spel leuk en duidelijk is en verbeter het iteratief wanneer je bewijs vindt dat iets beter kan.
+
+Optimaliseer in het bijzonder voor:
+binnen enkele seconden begrijpen wat je moet doen;
+één simpele input maar voldoende skill;
+korte speelsessies;
+sterke "nog één keer"-factor;
+duidelijke feedback en game feel;
+goed speelbaar op een telefoon;
+snelle laadtijd;
+origineel genoeg om een eigen identiteit te hebben.
+
+Gebruik je beschikbare research-, subagent-, test-, visual- en verificatiemogelijkheden waar die daadwerkelijk helpen.
+
+Lever uiteindelijk een volledig speelbare versie op.
+
+Het doel is niet om precies mijn instructies uit te voeren. Het doel is om zelfstandig het beste one-button mobiele HTML-spel te bedenken, bouwen, testen en verbeteren dat je binnen je beschikbare middelen kunt maken.
