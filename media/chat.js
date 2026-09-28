@@ -1463,7 +1463,7 @@
   let lastConfig = {
     endpoint: '', model: '', hasToken: false, trustedCommands: [], confirmCommands: true,
     autonomousMode: false, autoTest: false, fastMode: false, maxParallelAgents: 32,
-    missionBudget: { maxTurns: 48, maxToolCalls: 2400, maxTokens: 6000000, maxWallMinutes: 360, maxStalledTurns: 12 },
+    missionBudget: { maxTurns: 192, maxToolCalls: 9600, maxTokens: 24000000, maxWallMinutes: 1440, maxStalledTurns: 48 },
   };
 
   const agentsConfigTab = textElement('button', 'config-tab', 'Agents');

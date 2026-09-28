@@ -49,15 +49,19 @@ export interface MissionBudgetVerdict {
 /**
  * Applied to AUTONOMOUS missions; interactive missions stay unlimited unless
  * configured. The single source of the defaults: package.json repeats them for
- * the Settings UI and a test keeps the two identical. (Raised 4× in v1.43.0 from
- * 12 turns / 600 calls / 1.5M tokens / 90 min / 3 stalled.)
+ * the Settings UI and a test keeps the two identical. (Raised 16× in v1.43.0 from
+ * the v1.42 values 12 turns / 600 calls / 1.5M tokens / 90 min / 3 stalled.)
+ *
+ * Tokens dominate in practice: every model call re-sends the whole prompt, so
+ * one busy turn of ~140 tool calls at ~36k prompt tokens already costs ~5M.
+ * The token ceiling is therefore sized for real agent turns, not for text volume.
  */
 export const DEFAULT_MISSION_BUDGET: MissionBudget = {
-  maxTurns: 48,
-  maxToolCalls: 2400,
-  maxTokens: 6_000_000,
-  maxWallMs: 360 * 60_000,
-  maxStalledTurns: 12,
+  maxTurns: 192,
+  maxToolCalls: 9600,
+  maxTokens: 24_000_000,
+  maxWallMs: 1440 * 60_000,
+  maxStalledTurns: 48,
 };
 
 /** The user-facing shape: wall time in MINUTES, as the settings expose it. */

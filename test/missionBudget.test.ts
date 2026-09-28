@@ -61,13 +61,23 @@ describe('mission budget', () => {
   it('describes usage against its limits in one line', () => {
     const line = describeMissionUsage({ ...newMissionUsage(), turns: 2, toolCalls: 30, promptTokens: 12_000, completionTokens: 500, wallMs: 3 * 60_000, stalledTurns: 1 }, DEFAULT_MISSION_BUDGET);
     // Counts print as-is; only token totals use thousands separators.
-    expect(line).toBe('turns 2/48 · tool calls 30/2400 · tokens 12,500/6,000,000 · 3 min/360 · stalled 1/12');
+    expect(line).toBe('turns 2/192 · tool calls 30/9600 · tokens 12,500/24,000,000 · 3 min/1440 · stalled 1/48');
   });
 
-  it('defaults are four times the original v1.42 ceilings', () => {
+  it('defaults are sixteen times the original v1.42 ceilings (4× twice)', () => {
     expect(DEFAULT_MISSION_BUDGET).toEqual({
-      maxTurns: 4 * 12, maxToolCalls: 4 * 600, maxTokens: 4 * 1_500_000, maxWallMs: 4 * 90 * 60_000, maxStalledTurns: 4 * 3,
+      maxTurns: 16 * 12, maxToolCalls: 16 * 600, maxTokens: 16 * 1_500_000, maxWallMs: 16 * 90 * 60_000, maxStalledTurns: 16 * 3,
     });
+  });
+
+  it('the default token ceiling leaves room for several heavy turns', () => {
+    // One observed turn: 139 tool calls, ~5.1M tokens (prompt re-sent per call).
+    const heavyTurn = { toolCalls: 139, promptTokens: 5_000_000, completionTokens: 93_258, durationMs: 33 * 60_000, progressed: true };
+    let u = newMissionUsage();
+    for (let i = 0; i < 4; i++) { u = accumulateMissionUsage(u, heavyTurn); }
+    expect(checkMissionBudget(u, DEFAULT_MISSION_BUDGET).allowed).toBe(true);
+    u = accumulateMissionUsage(u, heavyTurn);
+    expect(checkMissionBudget(u, DEFAULT_MISSION_BUDGET).code).toBe('MISSION_TOKENS');
   });
 
   it('converts the settings shape (wall time in minutes) and drops junk', () => {
@@ -76,7 +86,7 @@ describe('mission budget', () => {
     expect(missionBudgetFromSettings({ maxTurns: -1, maxToolCalls: 'x', maxTokens: undefined, maxWallMinutes: NaN })).toEqual({});
     // Unset settings fall back to the defaults when resolved.
     expect(resolveMissionBudget(DEFAULT_MISSION_BUDGET, missionBudgetFromSettings({}))).toEqual(DEFAULT_MISSION_BUDGET);
-    expect(missionBudgetToSettings(DEFAULT_MISSION_BUDGET)).toEqual({ maxTurns: 48, maxToolCalls: 2400, maxTokens: 6_000_000, maxWallMinutes: 360, maxStalledTurns: 12 });
+    expect(missionBudgetToSettings(DEFAULT_MISSION_BUDGET)).toEqual({ maxTurns: 192, maxToolCalls: 9600, maxTokens: 24_000_000, maxWallMinutes: 1440, maxStalledTurns: 48 });
   });
 
   it('package.json advertises exactly the defaults the code applies', () => {

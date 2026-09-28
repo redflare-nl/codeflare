@@ -1803,7 +1803,7 @@ export class ChatViewProvider {
         this._publishMission();
         this._resumePending = false;
         this._postMessage({ type: 'notice', text: `Mission budget reached — ${verdict.reason}. The mission stays paused ` +
-          `(${describeMissionUsage(coerceMissionUsage(this._mission.usage), this._missionBudget())}). Raise codeflare.missionBudget, or start a new task.` });
+          `(${describeMissionUsage(coerceMissionUsage(this._mission.usage), this._missionBudget())}). Raise the codeflare.missionBudget.* settings (chat Settings → Agents), or start a new task.` });
         return;
       }
     }
@@ -2047,7 +2047,7 @@ export class ChatViewProvider {
           if (!verdict.allowed) {
             this._mission = setMissionStatus(this._mission, 'paused', `Mission budget reached: ${verdict.reason}`);
             this._postMessage({ type: 'notice', text: `Mission budget reached — ${verdict.reason}. The mission is paused ` +
-              `(${describeMissionUsage(this._mission.usage!, this._missionBudget())}). Raise codeflare.missionBudget, or start a new task.` });
+              `(${describeMissionUsage(this._mission.usage!, this._missionBudget())}). Raise the codeflare.missionBudget.* settings (chat Settings → Agents), or start a new task.` });
             log(`Mission ${this._mission.id} paused by budget: ${verdict.code} — ${verdict.reason}`);
           }
         }
