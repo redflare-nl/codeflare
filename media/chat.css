@@ -1242,17 +1242,6 @@ body {
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
 }
-/* A labelled group inside a pane (e.g. the mission budget under Agents). */
-.config-section-title {
-  margin: 16px 0 8px;
-  padding-top: 10px;
-  border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--vscode-descriptionForeground);
-}
 
 /* ── Image attachments ─────────────────────────────── */
 

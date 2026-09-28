@@ -1500,7 +1500,18 @@
   ];
   let missionBudgetDirty = false;
   const missionBudgetInputs = {};
-  agentsConfigPane.append(textElement('div', 'config-section-title', 'Missiebudget (autonome missies)'));
+  // Its own tab: the budget bounds a MISSION, which is unrelated to how many
+  // subagents run at once. Appended before the tab click-binding below, so the
+  // generic handler covers it.
+  const budgetConfigTab = textElement('button', 'config-tab', 'Budget');
+  budgetConfigTab.type = 'button';
+  budgetConfigTab.dataset.tab = 'budget';
+  document.querySelector('.config-tabs').appendChild(budgetConfigTab);
+  const budgetConfigPane = textElement('div', 'config-pane hidden');
+  budgetConfigPane.dataset.pane = 'budget';
+  budgetConfigPane.append(textElement('div', 'config-hint',
+    'Plafonds voor één autonome missie als geheel (alle turns, herstelrondes en teststap). 0 = onbeperkt. ' +
+    'Een missie die een plafond bereikt wordt gepauzeerd met de reden. Interactieve missies worden nooit begrensd.'));
   for (const [key, label] of MISSION_BUDGET_FIELDS) {
     const field = textElement('label', 'config-field');
     const input = document.createElement('input');
@@ -1511,12 +1522,10 @@
     input.required = true;
     input.addEventListener('input', () => { missionBudgetDirty = true; });
     field.append(textElement('span', '', label), input);
-    agentsConfigPane.append(field);
+    budgetConfigPane.append(field);
     missionBudgetInputs[key] = input;
   }
-  agentsConfigPane.append(textElement('div', 'config-hint',
-    'Plafonds voor één autonome missie als geheel (alle turns, herstelrondes en teststap). 0 = onbeperkt. ' +
-    'Een missie die een plafond bereikt wordt gepauzeerd met de reden. Interactieve missies worden nooit begrensd.'));
+  document.querySelector('.config-actions').before(budgetConfigPane);
 
   function fillMissionBudget(budget) {
     for (const [key] of MISSION_BUDGET_FIELDS) {
@@ -1699,7 +1708,7 @@
     for (const [key] of MISSION_BUDGET_FIELDS) {
       const input = missionBudgetInputs[key];
       if (!input.checkValidity() || !Number.isInteger(Number(input.value))) {
-        selectConfigTab('agents');
+        selectConfigTab('budget');
         input.reportValidity();
         return;
       }

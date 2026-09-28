@@ -147,18 +147,31 @@ describe('live mission footer', () => {
   });
 });
 
-describe('mission budget fields (Settings → Agents)', () => {
+describe('mission budget fields (Settings → Budget)', () => {
   // Loads the PRODUCTION block from chat.js, so this breaks if the fields change.
   function budgetHarness() {
-    const pane = new Element();
+    const tabs = new Element();
     const context = vm.createContext({
-      document: { createElement: () => new Element() },
-      agentsConfigPane: pane,
+      document: {
+        createElement: () => new Element(),
+        // '.config-tabs' receives the tab; '.config-actions' is only an insertion anchor.
+        querySelector: (selector: string) => selector === '.config-tabs' ? tabs : new Element(),
+      },
       textElement: (_tag: string, cls = '', text = '') => { const e = new Element(); e.className = cls; e.textContent = text; return e; },
     });
     vm.runInContext(section('  // ── Mission budget (autonomous missions as a whole)', '  function selectConfigTab('), context);
-    return { pane, run: (script: string) => vm.runInContext(script, context) };
+    const run = (script: string) => vm.runInContext(script, context);
+    return { tabs, pane: run('budgetConfigPane') as Element, run };
   }
+
+  it('lives in its own "Budget" tab, not under Agents', () => {
+    const ui = budgetHarness();
+    expect(ui.tabs.children).toHaveLength(1);
+    expect(ui.tabs.children[0].textContent).toBe('Budget');
+    expect(ui.tabs.children[0].dataset.tab).toBe('budget');
+    expect(ui.pane.dataset.pane).toBe('budget');
+    expect(ui.pane.className).toContain('hidden');
+  });
 
   it('renders one whole-number field per budget ceiling, minimum 0', () => {
     const ui = budgetHarness();
@@ -169,8 +182,9 @@ describe('mission budget fields (Settings → Agents)', () => {
       expect(input.min, key).toBe('0');
       expect(input.step, key).toBe('1');
     }
-    // Section title, five fields, one hint.
-    expect(ui.pane.children).toHaveLength(7);
+    // One explanatory hint, then the five fields.
+    expect(ui.pane.children).toHaveLength(6);
+    expect(ui.pane.children[0].className).toBe('config-hint');
   });
 
   it('fills from the host state and leaves a field empty rather than inventing a value', () => {
