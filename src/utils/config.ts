@@ -132,6 +132,8 @@ export interface CodeFlareConfig {
   maxParallelAgents: number;
   autonomousMode: boolean;
   autoTest: boolean;
+  /** Ask the model to reason less per call and skip the extra reasoning-discipline prompt. */
+  fastMode: boolean;
   memoryEmbeddingModel: string;
   /** Independent judge: '' = the worker reviews itself (previous behaviour). */
   judgeProvider: Provider | '';
@@ -228,6 +230,7 @@ export function getConfig(): CodeFlareConfig {
     })(),
     autonomousMode: cfg.get<boolean>('autonomousMode', false),
     autoTest: cfg.get<boolean>('autoTest', false),
+    fastMode: cfg.get<boolean>('fastMode', false),
     memoryEmbeddingModel: cfg.get<string>('memoryEmbeddingModel', '').trim(),
     judgeProvider: (() => {
       const v = (cfg.get<string>('judgeProvider', '') || '').trim();

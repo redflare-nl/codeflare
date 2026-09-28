@@ -1440,6 +1440,7 @@ export class ChatViewProvider {
         maxParallelAgents: config.maxParallelAgents,
         autonomousMode: config.autonomousMode,
         autoTest: config.autoTest,
+        fastMode: config.fastMode,
         contextSize: getContextSize(),
       },
     });
@@ -1576,9 +1577,10 @@ export class ChatViewProvider {
     maxParallelAgents?: number;
     autonomousMode?: boolean;
     autoTest?: boolean;
+    fastMode?: boolean;
   }): Promise<void> {
     const settings = vscode.workspace.getConfiguration('codeflare');
-    for (const key of ['autonomousMode', 'autoTest'] as const) {
+    for (const key of ['autonomousMode', 'autoTest', 'fastMode'] as const) {
       if (typeof cfg[key] === 'boolean') { await settings.update(key, cfg[key], vscode.ConfigurationTarget.Global); }
     }
     if (typeof cfg.maxParallelAgents === 'number' && Number.isInteger(cfg.maxParallelAgents) && cfg.maxParallelAgents >= 1 && cfg.maxParallelAgents <= 32) {
@@ -1956,8 +1958,9 @@ export class ChatViewProvider {
     // V10 adaptive reasoning: inject proportional problem-solving discipline for
     // the turn's problem shape (debug/perf/puzzle/architecture). Skipped for
     // advisory turns (the review block owns those) and whenever no strong signal
-    // fires — so trivial edits pay nothing and stay fast.
-    setProblemShape(isReview ? null : classifyProblem(text));
+    // fires — so trivial edits pay nothing and stay fast. Fast mode skips it
+    // outright: the user asked for less deliberation, not more.
+    setProblemShape(isReview || getConfig().fastMode ? null : classifyProblem(text));
     const learnedContext = await this._loadSkillContext(this._turnRequest);
     const systemPrompt = buildSystemPrompt(context) + '\n' + learnedContext + (this._mission?.autonomous
       ? '\n\nAUTONOMOUS MISSION: Define observable acceptance criteria, examine the existing project, and research only material unknowns. ' +
