@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'fs';
+import { resolve as resolvePath } from 'path';
 import {
   DEFAULT_MISSION_BUDGET, UNLIMITED_MISSION_BUDGET, accumulateMissionUsage, checkMissionBudget, coerceMissionUsage,
-  describeMissionUsage, newMissionUsage, resolveMissionBudget,
+  describeMissionUsage, missionBudgetFromSettings, missionBudgetToSettings, newMissionUsage, resolveMissionBudget,
 } from '../src/engine/missionBudget';
 
 const cost = (over: Partial<Parameters<typeof accumulateMissionUsage>[1]> = {}) =>
@@ -58,6 +60,32 @@ describe('mission budget', () => {
 
   it('describes usage against its limits in one line', () => {
     const line = describeMissionUsage({ ...newMissionUsage(), turns: 2, toolCalls: 30, promptTokens: 12_000, completionTokens: 500, wallMs: 3 * 60_000, stalledTurns: 1 }, DEFAULT_MISSION_BUDGET);
-    expect(line).toBe('turns 2/12 · tool calls 30/600 · tokens 12,500/1,500,000 · 3 min/90 · stalled 1/3');
+    // Counts print as-is; only token totals use thousands separators.
+    expect(line).toBe('turns 2/48 · tool calls 30/2400 · tokens 12,500/6,000,000 · 3 min/360 · stalled 1/12');
+  });
+
+  it('defaults are four times the original v1.42 ceilings', () => {
+    expect(DEFAULT_MISSION_BUDGET).toEqual({
+      maxTurns: 4 * 12, maxToolCalls: 4 * 600, maxTokens: 4 * 1_500_000, maxWallMs: 4 * 90 * 60_000, maxStalledTurns: 4 * 3,
+    });
+  });
+
+  it('converts the settings shape (wall time in minutes) and drops junk', () => {
+    expect(missionBudgetFromSettings({ maxTurns: 10, maxToolCalls: 0, maxTokens: 1e6, maxWallMinutes: 30, maxStalledTurns: 2.9 }))
+      .toEqual({ maxTurns: 10, maxToolCalls: 0, maxTokens: 1_000_000, maxWallMs: 30 * 60_000, maxStalledTurns: 2 });
+    expect(missionBudgetFromSettings({ maxTurns: -1, maxToolCalls: 'x', maxTokens: undefined, maxWallMinutes: NaN })).toEqual({});
+    // Unset settings fall back to the defaults when resolved.
+    expect(resolveMissionBudget(DEFAULT_MISSION_BUDGET, missionBudgetFromSettings({}))).toEqual(DEFAULT_MISSION_BUDGET);
+    expect(missionBudgetToSettings(DEFAULT_MISSION_BUDGET)).toEqual({ maxTurns: 48, maxToolCalls: 2400, maxTokens: 6_000_000, maxWallMinutes: 360, maxStalledTurns: 12 });
+  });
+
+  it('package.json advertises exactly the defaults the code applies', () => {
+    const props = JSON.parse(readFileSync(resolvePath(__dirname, '..', 'package.json'), 'utf8')).contributes.configuration.properties;
+    const shipped = missionBudgetToSettings(DEFAULT_MISSION_BUDGET);
+    for (const key of Object.keys(shipped) as (keyof typeof shipped)[]) {
+      expect(props[`codeflare.missionBudget.${key}`]?.default, key).toBe(shipped[key]);
+    }
+    // The old object-typed setting is gone (dotted children would conflict with it).
+    expect(props['codeflare.missionBudget']).toBeUndefined();
   });
 });

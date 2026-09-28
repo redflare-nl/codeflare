@@ -765,14 +765,35 @@
           "default": "",
           "markdownDescription": "Judge model name. Blank = the provider's default. **Set this explicitly when the judge is a local server other than the working one** — auto-discovery only knows the working server's model."
         },
-        "codeflare.missionBudget": {
-          "type": "object",
-          "default": {},
-          "markdownDescription": "Ceilings for one **autonomous mission** as a whole (all its turns, fix rounds and test stage). Keys: `maxTurns` (12), `maxToolCalls` (600), `maxTokens` (1500000), `maxWallMs` (5400000 = 90 min), `maxStalledTurns` (3 — consecutive turns that changed no file and produced no passing evidence). `0` = unlimited. A mission that hits a ceiling is paused with the reason; interactive missions are not limited.",
-          "properties": {
-            "maxTurns": { "type": "number" }, "maxToolCalls": { "type": "number" }, "maxTokens": { "type": "number" },
-            "maxWallMs": { "type": "number" }, "maxStalledTurns": { "type": "number" }
-          }
+        "codeflare.missionBudget.maxTurns": {
+          "type": "integer",
+          "default": 48,
+          "minimum": 0,
+          "markdownDescription": "**Mission budget** — maximum turns (including fix rounds and the test stage) for one **autonomous mission** as a whole. `0` = unlimited. A mission that reaches a ceiling is paused with the reason; interactive missions are never limited."
+        },
+        "codeflare.missionBudget.maxToolCalls": {
+          "type": "integer",
+          "default": 2400,
+          "minimum": 0,
+          "markdownDescription": "**Mission budget** — maximum tool calls across all turns of one autonomous mission. `0` = unlimited."
+        },
+        "codeflare.missionBudget.maxTokens": {
+          "type": "integer",
+          "default": 6000000,
+          "minimum": 0,
+          "markdownDescription": "**Mission budget** — maximum prompt + completion tokens across one autonomous mission. `0` = unlimited."
+        },
+        "codeflare.missionBudget.maxWallMinutes": {
+          "type": "integer",
+          "default": 360,
+          "minimum": 0,
+          "markdownDescription": "**Mission budget** — maximum model time in minutes (summed turn durations) for one autonomous mission. `0` = unlimited."
+        },
+        "codeflare.missionBudget.maxStalledTurns": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 0,
+          "markdownDescription": "**Mission budget** — stop rule: pause an autonomous mission after this many consecutive turns that changed no file and produced no passing evidence. `0` = never pause for lack of progress."
         },
         "codeflare.skillHoldoutRate": {
           "type": "number",

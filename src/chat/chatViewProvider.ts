@@ -5,7 +5,8 @@ import { resolveJudgeTarget } from '../llm/judge';
 import { buildReflectionMessages, parseReflection } from '../engine/reflection';
 import { CalibrationPolicy, calibrationPolicy, computeCalibration } from '../engine/calibration';
 import {
-  DEFAULT_MISSION_BUDGET, MissionBudget, accumulateMissionUsage, checkMissionBudget, coerceMissionUsage, describeMissionUsage, resolveMissionBudget,
+  DEFAULT_MISSION_BUDGET, MissionBudget, accumulateMissionUsage, checkMissionBudget, coerceMissionUsage, describeMissionUsage,
+  missionBudgetToSettings, resolveMissionBudget,
 } from '../engine/missionBudget';
 import { BacklogItem, BacklogStatus, describeBacklog, goalPrompt } from '../engine/backlog';
 import { setCalibrationNote } from '../llm/prompts';
@@ -1457,6 +1458,9 @@ export class ChatViewProvider {
         trustedCommands: config.trustedCommands,
         confirmCommands: config.confirmCommands,
         maxParallelAgents: config.maxParallelAgents,
+        // Effective values (defaults merged with the user's settings), in the
+        // shape the dialog edits: wall time in minutes.
+        missionBudget: missionBudgetToSettings(this._missionBudget()),
         autonomousMode: config.autonomousMode,
         autoTest: config.autoTest,
         fastMode: config.fastMode,
@@ -1597,10 +1601,22 @@ export class ChatViewProvider {
     autonomousMode?: boolean;
     autoTest?: boolean;
     fastMode?: boolean;
+    missionBudget?: Record<string, unknown>;
   }): Promise<void> {
     const settings = vscode.workspace.getConfiguration('codeflare');
     for (const key of ['autonomousMode', 'autoTest', 'fastMode'] as const) {
       if (typeof cfg[key] === 'boolean') { await settings.update(key, cfg[key], vscode.ConfigurationTarget.Global); }
+    }
+    // Mission budget fields: whole numbers ≥ 0 only (0 = unlimited). A value
+    // equal to the shipped default is written as undefined so the setting keeps
+    // following future default changes instead of pinning today's number.
+    if (cfg.missionBudget && typeof cfg.missionBudget === 'object') {
+      const defaults = missionBudgetToSettings(DEFAULT_MISSION_BUDGET);
+      for (const key of ['maxTurns', 'maxToolCalls', 'maxTokens', 'maxWallMinutes', 'maxStalledTurns'] as const) {
+        const v = cfg.missionBudget[key];
+        if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) { continue; }
+        await settings.update(`missionBudget.${key}`, v === defaults[key] ? undefined : v, vscode.ConfigurationTarget.Global);
+      }
     }
     if (typeof cfg.maxParallelAgents === 'number' && Number.isInteger(cfg.maxParallelAgents) && cfg.maxParallelAgents >= 1 && cfg.maxParallelAgents <= 32) {
       await settings.update('maxParallelAgents', cfg.maxParallelAgents, vscode.ConfigurationTarget.Global);

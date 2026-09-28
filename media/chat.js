@@ -1463,6 +1463,7 @@
   let lastConfig = {
     endpoint: '', model: '', hasToken: false, trustedCommands: [], confirmCommands: true,
     autonomousMode: false, autoTest: false, fastMode: false, maxParallelAgents: 32,
+    missionBudget: { maxTurns: 48, maxToolCalls: 2400, maxTokens: 6000000, maxWallMinutes: 360, maxStalledTurns: 12 },
   };
 
   const agentsConfigTab = textElement('button', 'config-tab', 'Agents');
@@ -1486,6 +1487,43 @@
   agentsConfigPane.append(agentLimitField,
     textElement('div', 'config-hint', '1–32 agents. De hoofdagent kiest hoeveel agents nodig zijn. Wachtende taken tellen niet als actief; alle subagents delen deze limiet.'));
   document.querySelector('.config-actions').before(agentsConfigPane);
+
+  // ── Mission budget (autonomous missions as a whole) ──────────────
+  // Mirrors the codeflare.missionBudget.* settings; 0 = unlimited. The
+  // extension validates again before writing, so this is convenience, not trust.
+  const MISSION_BUDGET_FIELDS = [
+    ['maxTurns', 'Maximaal aantal turns'],
+    ['maxToolCalls', 'Maximaal aantal tool calls'],
+    ['maxTokens', 'Maximaal aantal tokens'],
+    ['maxWallMinutes', 'Maximale modeltijd (minuten)'],
+    ['maxStalledTurns', 'Pauzeren na turns zonder voortgang'],
+  ];
+  let missionBudgetDirty = false;
+  const missionBudgetInputs = {};
+  agentsConfigPane.append(textElement('div', 'config-section-title', 'Missiebudget (autonome missies)'));
+  for (const [key, label] of MISSION_BUDGET_FIELDS) {
+    const field = textElement('label', 'config-field');
+    const input = document.createElement('input');
+    input.id = `cfg-mission-${key}`;
+    input.type = 'number';
+    input.min = '0';
+    input.step = '1';
+    input.required = true;
+    input.addEventListener('input', () => { missionBudgetDirty = true; });
+    field.append(textElement('span', '', label), input);
+    agentsConfigPane.append(field);
+    missionBudgetInputs[key] = input;
+  }
+  agentsConfigPane.append(textElement('div', 'config-hint',
+    'Plafonds voor één autonome missie als geheel (alle turns, herstelrondes en teststap). 0 = onbeperkt. ' +
+    'Een missie die een plafond bereikt wordt gepauzeerd met de reden. Interactieve missies worden nooit begrensd.'));
+
+  function fillMissionBudget(budget) {
+    for (const [key] of MISSION_BUDGET_FIELDS) {
+      const v = budget && typeof budget[key] === 'number' ? budget[key] : '';
+      missionBudgetInputs[key].value = String(v);
+    }
+  }
 
   function selectConfigTab(name) {
     document.querySelectorAll('.config-tab').forEach(t =>
@@ -1617,6 +1655,8 @@
     document.getElementById('cfg-confirm-commands').checked = lastConfig.confirmCommands !== false;
     agentLimitInput.value = String(boundedAgentLimit(lastConfig.maxParallelAgents));
     agentLimitDirty = false;
+    fillMissionBudget(lastConfig.missionBudget);
+    missionBudgetDirty = false;
     updateProviderHint();
     updateModelPlaceholder();
     selectConfigTab('connection');
@@ -1656,6 +1696,14 @@
       agentLimitInput.reportValidity();
       return;
     }
+    for (const [key] of MISSION_BUDGET_FIELDS) {
+      const input = missionBudgetInputs[key];
+      if (!input.checkValidity() || !Number.isInteger(Number(input.value))) {
+        selectConfigTab('agents');
+        input.reportValidity();
+        return;
+      }
+    }
     const provider = document.getElementById('cfg-provider').value;
     const endpoint = document.getElementById('cfg-endpoint').value.trim();
     const model = document.getElementById('cfg-model').value.trim();
@@ -1669,6 +1717,7 @@
       autoTest: lastConfig.autoTest === true,
       fastMode: fastModeInput.checked,
       maxParallelAgents: Number(agentLimitInput.value),
+      missionBudget: Object.fromEntries(MISSION_BUDGET_FIELDS.map(([key]) => [key, Number(missionBudgetInputs[key].value)])),
     };
     // Only send the token when the user typed something, so an empty field
     // keeps the previously stored token instead of wiping it.
@@ -1683,6 +1732,9 @@
     configuredAgentLimit = boundedAgentLimit(lastConfig.maxParallelAgents);
     if (configOverlay.classList.contains('hidden') || !agentLimitDirty) {
       agentLimitInput.value = String(configuredAgentLimit);
+    }
+    if (configOverlay.classList.contains('hidden') || !missionBudgetDirty) {
+      fillMissionBudget(lastConfig.missionBudget);
     }
     renderMission(currentMission);
     if (endpointLabel) {

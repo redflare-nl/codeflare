@@ -46,14 +46,49 @@ export interface MissionBudgetVerdict {
   reason?: string;
 }
 
-/** Applied to AUTONOMOUS missions; interactive missions stay unlimited unless configured. */
+/**
+ * Applied to AUTONOMOUS missions; interactive missions stay unlimited unless
+ * configured. The single source of the defaults: package.json repeats them for
+ * the Settings UI and a test keeps the two identical. (Raised 4× in v1.43.0 from
+ * 12 turns / 600 calls / 1.5M tokens / 90 min / 3 stalled.)
+ */
 export const DEFAULT_MISSION_BUDGET: MissionBudget = {
-  maxTurns: 12,
-  maxToolCalls: 600,
-  maxTokens: 1_500_000,
-  maxWallMs: 90 * 60_000,
-  maxStalledTurns: 3,
+  maxTurns: 48,
+  maxToolCalls: 2400,
+  maxTokens: 6_000_000,
+  maxWallMs: 360 * 60_000,
+  maxStalledTurns: 12,
 };
+
+/** The user-facing shape: wall time in MINUTES, as the settings expose it. */
+export interface MissionBudgetSettings {
+  maxTurns?: unknown;
+  maxToolCalls?: unknown;
+  maxTokens?: unknown;
+  maxWallMinutes?: unknown;
+  maxStalledTurns?: unknown;
+}
+
+/**
+ * Settings → budget overrides. Anything that is not a finite non-negative
+ * number is left out, so resolveMissionBudget falls back to the default for it.
+ */
+export function missionBudgetFromSettings(s: MissionBudgetSettings): Partial<MissionBudget> {
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
+  const out: Partial<MissionBudget> = {};
+  const turns = num(s.maxTurns); if (turns !== undefined) { out.maxTurns = turns; }
+  const calls = num(s.maxToolCalls); if (calls !== undefined) { out.maxToolCalls = calls; }
+  const tokens = num(s.maxTokens); if (tokens !== undefined) { out.maxTokens = tokens; }
+  const minutes = num(s.maxWallMinutes); if (minutes !== undefined) { out.maxWallMs = minutes * 60_000; }
+  const stalled = num(s.maxStalledTurns); if (stalled !== undefined) { out.maxStalledTurns = stalled; }
+  return out;
+}
+
+/** Budget → the user-facing shape (for the settings dialog). */
+export function missionBudgetToSettings(b: MissionBudget): Required<{ [K in keyof MissionBudgetSettings]: number }> {
+  return { maxTurns: b.maxTurns, maxToolCalls: b.maxToolCalls, maxTokens: b.maxTokens,
+    maxWallMinutes: Math.round(b.maxWallMs / 60_000), maxStalledTurns: b.maxStalledTurns };
+}
 
 export const UNLIMITED_MISSION_BUDGET: MissionBudget = {
   maxTurns: 0, maxToolCalls: 0, maxTokens: 0, maxWallMs: 0, maxStalledTurns: 0,

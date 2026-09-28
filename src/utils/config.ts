@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DEFAULT_FORBIDDEN_PATHS, DEFAULT_PROTECTED_PATHS } from '../engine/policy';
+import { MissionBudget, missionBudgetFromSettings } from '../engine/missionBudget';
 
 // Built-in safe (read-only / non-destructive / archived-delete) commands.
 // Merged with the user's own list at load time — never replaced by it.
@@ -142,7 +143,8 @@ export interface CodeFlareConfig {
   /** When memory reflection runs: only on request, or after each completed mission. */
   memoryReflection: 'manual' | 'after-mission';
   /** Per-field overrides on the autonomous mission budget (0 = unlimited). */
-  missionBudget: Record<string, unknown>;
+  /** Overrides from the codeflare.missionBudget.* settings (wall time already in ms). */
+  missionBudget: Partial<MissionBudget>;
   /** Fraction of autonomous missions in which an eligible skill is deliberately withheld (control trial). */
   skillHoldoutRate: number;
   /** Backlog items one Night Shift run may work through. */
@@ -239,7 +241,13 @@ export function getConfig(): CodeFlareConfig {
     judgeEndpoint: (cfg.get<string>('judgeEndpoint', '') || '').trim(),
     judgeModel: (cfg.get<string>('judgeModel', '') || '').trim(),
     memoryReflection: cfg.get<string>('memoryReflection', 'manual') === 'after-mission' ? 'after-mission' : 'manual',
-    missionBudget: cfg.get<Record<string, unknown>>('missionBudget', {}) || {},
+    missionBudget: missionBudgetFromSettings({
+      maxTurns: cfg.get('missionBudget.maxTurns'),
+      maxToolCalls: cfg.get('missionBudget.maxToolCalls'),
+      maxTokens: cfg.get('missionBudget.maxTokens'),
+      maxWallMinutes: cfg.get('missionBudget.maxWallMinutes'),
+      maxStalledTurns: cfg.get('missionBudget.maxStalledTurns'),
+    }),
     skillHoldoutRate: (() => {
       const v = Number(cfg.get<number>('skillHoldoutRate', 0.1));
       return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;

@@ -61,6 +61,9 @@ function footerHarness() {
     isStreaming: false, currentBubble: null, currentContent: '', thinkContent: '',
     lastConfig: { autonomousMode: false, autoTest: false },
     configOverlay, agentLimitInput, agentLimitDirty: false, endpointLabel: null,
+    // applyConfigState also refreshes the mission-budget fields; they have their
+    // own harness below, so the footer only needs them to exist.
+    missionBudgetDirty: false, fillMissionBudget: () => {},
     clearToolProgress: () => {}, scrollToBottom: () => {}, showWaiting: () => {},
   });
   // Exercise the production footer, stream lifecycle and Stop handler without
@@ -141,5 +144,49 @@ describe('live mission footer', () => {
     expect(ui.run('missionCount.textContent')).toBe('0 / 2 agents actief');
     ui.run("renderMission({status:'running',phase:'build',activity:'Nieuwe opdracht'},2);");
     expect(ui.run('missionCount.textContent')).toBe('0 / 2 agents actief');
+  });
+});
+
+describe('mission budget fields (Settings → Agents)', () => {
+  // Loads the PRODUCTION block from chat.js, so this breaks if the fields change.
+  function budgetHarness() {
+    const pane = new Element();
+    const context = vm.createContext({
+      document: { createElement: () => new Element() },
+      agentsConfigPane: pane,
+      textElement: (_tag: string, cls = '', text = '') => { const e = new Element(); e.className = cls; e.textContent = text; return e; },
+    });
+    vm.runInContext(section('  // ── Mission budget (autonomous missions as a whole)', '  function selectConfigTab('), context);
+    return { pane, run: (script: string) => vm.runInContext(script, context) };
+  }
+
+  it('renders one whole-number field per budget ceiling, minimum 0', () => {
+    const ui = budgetHarness();
+    expect(ui.run('MISSION_BUDGET_FIELDS.map(f => f[0]).join(",")')).toBe('maxTurns,maxToolCalls,maxTokens,maxWallMinutes,maxStalledTurns');
+    for (const key of ['maxTurns', 'maxToolCalls', 'maxTokens', 'maxWallMinutes', 'maxStalledTurns']) {
+      const input = ui.run(`missionBudgetInputs.${key}`);
+      expect(input.type, key).toBe('number');
+      expect(input.min, key).toBe('0');
+      expect(input.step, key).toBe('1');
+    }
+    // Section title, five fields, one hint.
+    expect(ui.pane.children).toHaveLength(7);
+  });
+
+  it('fills from the host state and leaves a field empty rather than inventing a value', () => {
+    const ui = budgetHarness();
+    ui.run('fillMissionBudget({ maxTurns: 48, maxToolCalls: 2400, maxTokens: 6000000, maxWallMinutes: 360, maxStalledTurns: 12 })');
+    expect(ui.run('missionBudgetInputs.maxTurns.value')).toBe('48');
+    expect(ui.run('missionBudgetInputs.maxWallMinutes.value')).toBe('360');
+    ui.run('fillMissionBudget({ maxTurns: 5 })');
+    expect(ui.run('missionBudgetInputs.maxTurns.value')).toBe('5');
+    expect(ui.run('missionBudgetInputs.maxTokens.value')).toBe('');
+  });
+
+  it('marks the form dirty once the user types, so a host refresh does not overwrite the edit', () => {
+    const ui = budgetHarness();
+    expect(ui.run('missionBudgetDirty')).toBe(false);
+    ui.run('missionBudgetInputs.maxTurns.listeners.input()');
+    expect(ui.run('missionBudgetDirty')).toBe(true);
   });
 });
